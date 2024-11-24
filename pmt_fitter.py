@@ -1,23 +1,23 @@
 import time
+import emcee
 import numpy as np
 
-from typing import Callable
 from tweedie import tweedie
+from scipy.stats import gamma
 from scipy.fft import fft, ifft
 from scipy.signal import find_peaks
-from scipy.optimize import curve_fit
-from scipy.stats import gamma, expon, norm
-from abc import ABCMeta
+from tweedie_pdf import tweedie_reckon
+from abc import ABCMeta, abstractmethod
 
 
 class PMT_Fitter(metaclass=ABCMeta):
     def __init__(
         self, 
-        charge, 
+        hist, 
+        bins, 
         A, 
-        occ_init, 
+        mu_init = None, 
         sample = None, 
-        cut:float | tuple[float] = (0.2, 5), 
         seterr:str = 'warn', 
         init = None, 
         bounds = None
@@ -25,34 +25,20 @@ class PMT_Fitter(metaclass=ABCMeta):
         np.seterr(all=seterr)
         
         self.A = A
-        c = charge if isinstance(charge, np.ndarray) else np.array(charge)
         self.bounds = bounds.tolist() if isinstance(bounds, np.ndarray) else list(bounds)
         self._init = init if isinstance(init, np.ndarray) else np.array(init)
-        self._occ_init = occ_init if isinstance(occ_init, np.ndarray) else np.array(occ_init)
+        occ_init = sum(hist) / A
+        self._mu_init = -np.log(1 - occ_init) if mu_init is None else mu_init
+        print(f'mu init: {self._mu_init}')
         # see https://gitlab.airelinux.org/juno/OSIRIS/production/-/issues/48#note_42922
-        self.sample = 16 * int(np.exp(-0.673313 * np.log(1 - np.max(self._occ_init)))) if sample is None else sample
+        self.sample = 16 * int(np.exp(0.673313 * self._mu_init)) if sample is None else sample
 
-        self.init = np.append(self._init, self._occ_init)
-        self.bounds.append((0, 1))
+        self.init = np.append(self._init, self._mu_init)
+        self.bounds.append((0.5 * self._mu_init, 1.5 * self._mu_init))
         self.bounds = tuple(self.bounds)
-                
-        if isinstance(cut, tuple):
-            lower, upper = cut
-            if lower is None:
-                lower = 0
-            if upper is None:
-                upper = 1000
-        else:
-            # default lower cut
-            lower = 0.2     
-            upper = cut
             
-        hist, bins = np.histogram(c, bins='fd')
-        peaks, _ = find_peaks(hist, distance=np.ptp(c))
-        c = c[c >= lower * bins[peaks[0]]]
-        c = c[c <= upper * bins[peaks[0]]]
-                
-        self.hist, self.bins = np.histogram(c, bins='fd')
+        self.hist = hist
+        self.bins = bins
         self.zero = A - sum(self.hist)
         # there is no need to check these variables outside the class
         self._bin_width = self.bins[1] - self.bins[0]
@@ -109,7 +95,7 @@ class PMT_Fitter(metaclass=ABCMeta):
             if flag == False:
                 return False
         return flag
-
+    
     def get_gain(self, args):
         pass
     
@@ -138,9 +124,9 @@ class PMT_Fitter(metaclass=ABCMeta):
         pass
     
     def _zero(self, args):
-        pass
+        return 1 - args[-1]
 
-    def _const(self, args):
+    def const(self, args):
         return 0
     
     def _pdf_sr(self, args):
@@ -149,18 +135,17 @@ class PMT_Fitter(metaclass=ABCMeta):
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), occupancy)
+            (ser_args_1, ..., ser_args_(dof), mu)
         """
         ser_args = args[:self.dof]
-        occupancy = args[self.dof]
-        s_sp = fft(self._pdf(ser_args)) * self._xsp_width + self._const(ser_args)
-        mu = -np.log(1 - occupancy)
+        mu = args[self.dof]
+        s_sp = fft(self._pdf(ser_args)) * self._xsp_width + self.const(ser_args)
         sr_sp = np.exp(mu * (s_sp - 1))
         sr_sp = np.real(ifft(sr_sp)) / self._xsp_width
         return sr_sp
     
     def _estimate_smooth(self, args):
-        return self.A * self._pdf_sr(args=args) * self._bin_width
+        return self.A * self._bin_width * self._pdf_sr(args=args) 
     
     def _estimate_count(self, args) -> tuple:
         """ Estimate counts of every bin.
@@ -168,7 +153,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), occupancy)
+            (ser_args_1, ..., ser_args_(dof), mu)
             
         Return
         ------
@@ -197,7 +182,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), occupancy)
+            (ser_args_1, ..., ser_args_(dof), mu)
         """
         # make sure args are in range
         # otherwise an infinite "well"
@@ -220,97 +205,75 @@ class PMT_Fitter(metaclass=ABCMeta):
     
     def fit(
         self, 
-        burn_in:int=2500,
-        mc_step:int=5000,
+        nwalkers:int=32, 
+        burn_in:int=50,
+        step:int=200,
         seed:int=None,
-        verbose:int=10,
-        track:int=0, 
+        track:int=1, 
         step_length:dict[str, float]=None
     ):
-        """ MCMC fit.
-        
+        """ MCMC fit using `emcee`.
+                
         Parameters
         ----------
-        mc_step : int
-            MCMC step.
-        verbose : int
-            If equals 0, no intermediate info would be printed.
-            Otherwise, event verbose steps, info would be printed.
-        track : int
-            If equals 0, no intermediate value would be recorded.
-            Otherwise, event track steps, log-l and parameters would be recorded.
+        nwalkers : int
+            Number of parallel chains for `emcee`.
+        burn_in : int
+            Burn in step for `emcee`.
+        step : int
+            MCMC step for `emcee`.
         seed : int
             Seed for random.
+        track : int
+            Take only every `track` steps from the chain.
+        step_length : dict[str, float]
+            Step length to generate initial values.
+            
+        Notes
+        -----
+        `nwalkers >= 2 * ndim`, credits to Xuewei.
         """
-        steps_mc = np.array(list(step_length.values()))
-        args = self.init
-        args_mc = np.zeros((mc_step, self.dof + 1))
-        
         if seed is not None:
             np.random.seed(seed)
-        u_perturb = np.random.uniform(-1, 1, (mc_step, self.dof + 1))
-        u_accept = np.random.uniform(0, 1, (mc_step, self.dof + 1))
-        perturbation = steps_mc * u_perturb
-        acceptance_log = np.log(u_accept)
-        del u_perturb, u_accept
         
-        if track != 0:
-            self.track = track
-            self.log_l_track = []
-            self.ser_args_track = []  
+        ndim = self.dof + 1
+        p0 = self.init + np.random.uniform(-1, 1, (nwalkers, ndim)) * list(step_length.values())
         
-        #--------------
-        #-- sampling --
-        #--------------
-        for step in range(mc_step):
-            likelihood = self.log_l(args)
-            for i, arg in enumerate(args):
-                args_new = np.copy(args)
-                args_new[i] += perturbation[step, i]
-                likelihood_new = self.log_l(args_new)
-                index = likelihood_new - likelihood > acceptance_log[step, i]
-                args = [args, args_new][index]
-                likelihood = [likelihood, likelihood_new][index]
-            args_mc[step, :] = args
-            
-            # print verbose
-            if verbose != 0 and step % verbose == 0:
-                print("----------")
-                print(f'Step {step}, log likelihood: {likelihood}')
-                print("Params: " + ', '.join([f'{e:.6g}' for e in args]))
-                print(time.strftime("%H:%M:%S",time.gmtime(time.time() - self._start)))
-                self._start = time.time()
-                
-            # record track
-            if track != 0 and step % track == 0:
-                self.log_l_track.append(likelihood)
-                self.ser_args_track.append(args)
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_l, moves=emcee.moves.WalkMove())
+        sampler.run_mcmc(p0, step)
         
-        # burn and print final result
-        args_mc = args_mc[burn_in:, :]
-        args = np.mean(args_mc, axis=0)
-        args_std = np.std(args_mc, axis=0)
-        self.ser_args = args[:self.dof]
-        self.ser_args_std = args_std[:self.dof]
-        self.occupancy = args[self.dof]
-        self.occupancy_std = args_std[self.dof]
-        self.likelihood = self.log_l(args)
-        self.Gps = np.apply_along_axis(self.get_gain, axis=1, arr=args_mc, gain="gp")
-        self.Gms = np.apply_along_axis(self.get_gain, axis=1, arr=args_mc, gain="gm")
-        del args_mc
+        acceptance = sampler.acceptance_fraction
+        # autocorr_time = sampler.get_autocorr_time(discard=burn_in)
+        
+        self.log_l_track = sampler.get_log_prob(thin=track)                 # (step, nwalkers)
+        # select the max log-likelihood (last 1000 steps) chain
+        ind = np.argmax(np.mean(self.log_l_track[-1000:, :], axis=0))
+        self.samples_track = sampler.get_chain(discard=burn_in)[:, ind, :]  # (step, ndim)
+        self.ser_args = np.mean(self.samples_track[:, :self.dof], axis=0)
+        self.ser_args_std = np.std(self.samples_track[:, :self.dof], axis=0)
+        self.mu = np.mean(self.samples_track[:, -1], axis=0)
+        self.mu_std = np.std(self.samples_track[:, -1], axis=0)
+        args_complete = np.append(self.ser_args, self.mu)
+        
+        self.gps = np.apply_along_axis(self.get_gain, axis=1, arr=self.samples_track, gain="gp")
+        self.gms = np.apply_along_axis(self.get_gain, axis=1, arr=self.samples_track, gain="gm")
         
         print("----------")
-        print(f'Reach {mc_step} steps.')
-        print(f'log likelihood: {likelihood}')
-        print("SER params: " + ', '.join([f'{e:.3g}$\pm${f:.3g}' for e, f in zip(self.ser_args, self.ser_args_std)]))
-        print(f'Occupancy: {self.occupancy:.3g}$\pm${self.occupancy_std:.3g}')
-
-        self.gains_mean = np.mean(self.Gms)
-        self.gains_std = np.std(self.Gms)
-        self.BIC = (self.dof + 1) * np.log(len(self.hist) + 1) - 2 * self.likelihood
-        self.chi_sq = self.get_chi_sq(args)
-        self.smooth = self._estimate_smooth(args)
-        self.ys, self.zs = self._estimate_count(args)
+        # print(f'Mean autocorrelation time: {autocorr_time} steps')
+        print(f'Current burn-in: {burn_in} steps')
+        print(f'Mean acceptance fraction: {np.mean(acceptance):.3f}')
+        print(f'Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}')
+        print("----------")
+        print("SER params: " + ', '.join([f'{e:.4g} pm {f:.4g}' for e, f in zip(self.ser_args, self.ser_args_std)]))
+        print("mu: " + ', '.join([f'{self.mu:.4g} pm {self.mu_std:.4g}']))
+        
+        self.likelihood = self.log_l(args_complete)
+        self.gains_mean = np.mean(self.gms)
+        self.gains_std = np.std(self.gms)
+        self.BIC = ndim * np.log(len(self.hist) + 1) - 2 * self.likelihood
+        self.chi_sq = self.get_chi_sq(args_complete)
+        self.smooth = self._estimate_smooth(args_complete)
+        self.ys, self.zs = self._estimate_count(args_complete)
 
 
 class MCP_Fitter(PMT_Fitter):
@@ -323,7 +286,7 @@ class MCP_Fitter(PMT_Fitter):
     A : ArrayLike
         total charge count
     occ_init : ArrayLike
-        initial occupancy
+        initial mu
     sample : int
         the number of sample intervals between bins
     cut : float or tuple[float]
@@ -332,41 +295,46 @@ class MCP_Fitter(PMT_Fitter):
         initial params of SER charge model, in the order of
         "main peak ratio, main peak k/shape, main peak theta/rate, 
         secondary electron number, secondary alpha/shape, secondary beta/rate"
+    bounds : ArrayLike
+        initial bounds of SER charge model, secondary within 3 sigma
     seterr : {'ignore', 'warn', 'raise', 'call', 'print', 'log'}
         see https://numpy.org/doc/stable/reference/generated/numpy.seterr.html
     """
     def __init__(
         self, 
-        charge, 
+        hist, 
+        bins, 
         A, 
-        occ_init, 
+        mu_init = None, 
         sample = None, 
-        cut: float | tuple[float] = (0.2, 5), 
         seterr: str = 'warn', 
-        init =
+        init = 
         [
-            .40,            # main peak ratio
-            15.00,          # main peak k/shape
-            50.00,          # main peak theta/scale
-            2.40,           # secondary electron number
-            0.52,           # secondary electron mean / Q1
-            0.16            # secondary electron std variance / Q1
+            .65,          # main peak ratio
+            15.0,         # main peak k/shape
+            52.0,         # main peak theta/scale
+            4.0,          # secondary electron number
+            0.60,         # secondary electron mean / Q1
+            0.15          # secondary electron std variance / Q1
         ], 
         bounds = 
         [
-            (0, 1),         # ratio in (0, 1)
-            (1, None),      # alpha > 1 to ensure peak
-            (0, None),      # beta > 0
-            (0, None),      # secondary > 0
-            (0.3, 0.7),     # mean / Q1 based on Jun's work
-            (0.05, 0.3)     # std variance / Q1 based on Jun's work
+            (.35, 1),
+            (1, None),    # alpha > 1 to ensure peak
+            (0, None),    # beta > 0
+            (3, 7),       # secondary
+            (0.3, 0.7),   # mean / Q1 based on Jun's work
+            (0.05, 0.3)   # std variance / Q1 based on Jun's work
         ]
     ):
-        super().__init__(charge, A, occ_init, sample, cut, seterr, init, bounds)
+        super().__init__(hist, bins, A, mu_init, sample, seterr, init, bounds)
     
     # ------------
     # staticmethod
     # ------------
+
+    def const(self, args):
+        return (1 - args[0]) * np.exp(-args[3])
     
     def get_gain(self, args, gain:str="gm"):
         """ Return gain of MCP.
@@ -384,9 +352,9 @@ class MCP_Fitter(PMT_Fitter):
                 lam : float
                     mean of secondary electron numbers
                 mean : float
-                    mean of secondary Gamma gain / Q1
+                    calibrated on 8-inches, the mean of secondary Gamma gain / Q1
                 std_variance : float
-                    std variance of secondary Gamma gain / Q1
+                    calibrated on 8-inches, the std variance of secondary Gamma gain / Q1
                     
         Return
         ------
@@ -461,18 +429,27 @@ class MCP_Fitter(PMT_Fitter):
         return frac * gamma.pdf(x, a=k, scale=theta)
         
     def _pdf_tw(self, x, frac, mu, p, phi):
-        pdf = (1 - frac) * tweedie.pdf(x, mu=mu, p=p, phi=phi)
-        if 0 in x:
-            ind = np.where(x == 0)[0][0]
-            pdf[ind] = 0
+        inreg = sum(x <= 0)
+        pdf = (1 - frac) * tweedie_reckon(x[inreg:], p=p, mu=mu, phi=phi, dlambda=False)[0]
+        for _ in range(inreg):
+            pdf = np.insert(pdf, 0, 0)
         return pdf
+    
+    # --------
+    # property
+    # --------
+    
+    def Gms(self, args, A):
+        frac, k, theta = args[:3]
+        return A * self._bin_width * self._pdf_gm(self.xsp, frac=frac, k=k, theta=theta)
+    
+    def Tws(self, args, A):
+        frac, _, _, mu, p, phi = self._map_args(args)
+        return A * self._bin_width * self._pdf_tw(self.xsp, frac=frac, mu=mu, p=p, phi=phi)
     
     # -----------
     # classmethod
     # -----------
-
-    def _const(self, args):
-        return (1 - args[0]) * np.exp(-args[3])
     
     def _pdf(self, args):
         frac, k, theta, mu, p, phi = self._map_args(args)
@@ -484,54 +461,11 @@ class MCP_Fitter(PMT_Fitter):
         Parameters
         ----------
         args : ArrayLike
-            (frac, k, theta, lam, mean, std_variance, occupancy)
+            (frac, k, theta, lam, mean, std_variance, mu)
         """
         frac, _, _, lam, _, _ = args[:self.dof]
-        occupancy = args[-1]
-        mu = -np.log(1 - occupancy)
+        mu = args[self.dof]
         return np.exp(mu * ((1 - frac) * np.exp(-lam) - 1))
-
-    # ----------
-    # components
-    # ----------
-    
-    def gms(self, args):
-        frac, k, theta = args[:3]
-        return self.A * self._pdf_gm(self.xsp, frac=frac, k=k, theta=theta) * self._xsp_width
-    
-    def tws(self, args):
-        frac, _, _, mu, p, phi = self._map_args(args)
-        return self.A * self._pdf_tw(self.xsp, frac=frac, mu=mu, p=p, phi=phi) * self._xsp_width
-
-    # --------------
-    # default length
-    # --------------
-    step_length = {'frac'      : 0.05,
-                   'k'         : 1.0,
-                   'theta'     : 3.0,
-                   'lambda'    : 0.15,
-                   'mean'      : 0.05,
-                   'std_var'   : 0.03,
-                   'occupancy' : 0.05}
-
-    def fit(
-        self, 
-        burn_in:int=2500,
-        mc_step:int=5000,
-        seed:int=None,
-        verbose:int=10,
-        track:int=0, 
-        step_length:dict[str, float]=step_length
-    ):
-        """ MCMC fit.
-        
-        Additional Parameters
-        ---------------------
-        step_length : dict
-            keys in the order of ('frac', 'k', 'theta', 'lambda', 'mean', 'std_var', 'occupancy'),
-            values in float.
-        """
-        super().fit(burn_in, mc_step, seed, verbose, track, step_length)
         
         
 class Dynode_Fitter(PMT_Fitter):
@@ -544,7 +478,7 @@ class Dynode_Fitter(PMT_Fitter):
     A : ArrayLike
         total charge count
     occ_init : ArrayLike
-        initial occupancy
+        initial mu
     sample : int
         the number of sample intervals between bins
     cut : float or tuple[float]
@@ -553,17 +487,17 @@ class Dynode_Fitter(PMT_Fitter):
         initial params of SER charge model, in the order of
         "peak shape, peak rate"
     bounds : ArrayLike
-        initial bounds of SER charge model
+        initial bounds of SER charge model, secondary within 3 sigma
     seterr : {'ignore', 'warn', 'raise', 'call', 'print', 'log'}
         see https://numpy.org/doc/stable/reference/generated/numpy.seterr.html
     """
     def __init__(
         self, 
-        charge, 
+        hist, 
+        bins, 
         A, 
-        occ_init, 
+        mu_init, 
         sample = None, 
-        cut: float | tuple[float] = (0.2, 5), 
         seterr: str = 'warn', 
         init =
         [
@@ -576,7 +510,7 @@ class Dynode_Fitter(PMT_Fitter):
             (0, None),  # theta > 0
         ]
     ):
-        super().__init__(charge, A, occ_init, sample, cut, seterr, init, bounds)
+        super().__init__(hist, bins, A, mu_init, sample, seterr, init, bounds)
     
     # ------------
     # staticmethod
@@ -615,22 +549,11 @@ class Dynode_Fitter(PMT_Fitter):
     # -----------
     
     def _pdf(self, args):
-        p, G, sigma = args
         return gamma.pdf(self.xsp, a=args[0], scale=args[1])
     
-    def _zero(self, args):
-        """ MCP-PMT SER/SPE charge model zero charge count.
-                
-        Parameters
-        ----------
-        args : ArrayLike
-            (frac, k, theta, lam, mean, std_variance, occupancy)
-        """
-        return 1 - args[-1]
 
-
-class Simulation_Fitter(PMT_Fitter):
-    """ A temporary class to fit MCP PMT charge spectrum with Exponential-Gaussian model.
+class Mixture_Fitter(PMT_Fitter):
+    """ A class to fit Dynode PMT charge spectrum.
     
     Parameters
     ----------
@@ -646,7 +569,7 @@ class Simulation_Fitter(PMT_Fitter):
         the upper cut (lower cut optional), expressed with the ratio divided by main peak
     init : ArrayLike
         initial params of SER charge model, in the order of
-        "exponential fraction, main peak mu, main peak sigma"
+        "peak shape, peak rate"
     bounds : ArrayLike
         initial bounds of SER charge model, secondary within 3 sigma
     seterr : {'ignore', 'warn', 'raise', 'call', 'print', 'log'}
@@ -654,7 +577,8 @@ class Simulation_Fitter(PMT_Fitter):
     """
     def __init__(
         self, 
-        charge, 
+        hist, 
+        bins, 
         A, 
         occ_init, 
         sample = None, 
@@ -662,46 +586,18 @@ class Simulation_Fitter(PMT_Fitter):
         seterr: str = 'warn', 
         init =
         [
-            0.0433,
-            700,
+            5e-04,
+            800,
             200,
         ], 
         bounds =
         [
-            (0.035, 0.185),
-            (600, 900),
+            (1e-04, 3e-03),
+            (600, 1200),
             (0, 400),
-        ],
-        threshold: float = 0.5,
-        limit: tuple = (0.8, 1.2),
+        ]
     ):
-        if isinstance(init, float):
-            init = [init]
-        super().__init__(charge, A, occ_init, sample, cut, seterr, init, bounds)
-
-        # override init and bounds with main peak Gaussian fit
-        lower, upper = limit
-        ind_roi = np.where(self.hist >= max(self.hist) * threshold)[0]
-        xs_roi = self._xs[ind_roi]
-        ys_roi = self.hist[ind_roi]
-        bounds = list(self.bounds)
-
-        def func(x, a, b, c):
-            return a * norm.pdf(x, loc=b, scale=c)
-
-        popt, _ = curve_fit(func, xs_roi, ys_roi, p0=[self.A * self._occ_init * self._bin_width, *init[1:]])
-
-        if len(init) == 1:
-            self.init = np.concatenate((init, popt[1:], [self._occ_init]))
-            self.dof = 3
-            for i in range(1, self.dof):
-                bounds.append((popt[i] * lower, popt[i] * upper))
-            self.bounds = tuple(bounds)
-        elif len(init) == 3:
-            self.init[1:3] = popt[1:]
-            for i in range(1, self.dof):
-                bounds[i] = (popt[i] * 0.8, popt[i] * 1.2)
-            self.bounds = tuple(bounds)
+        super().__init__(hist, bins, A, occ_init, sample, cut, seterr, init, bounds)
     
     # ------------
     # staticmethod
@@ -743,49 +639,12 @@ class Simulation_Fitter(PMT_Fitter):
     
     def _pdf(self, args):
         p, G, sigma = args
-        return p * expon.pdf(self.xsp, loc=0.1 * G, scale=G * 2.2) + (1 - p) * norm.pdf(self.xsp, loc=G, scale=sigma)
-    
-    def _zero(self, args):
-        """ MCP-PMT SER/SPE charge model zero charge count.
-                
-        Parameters
-        ----------
-        args : ArrayLike
-            (frac, k, theta, lam, mean, std_variance, occupancy)
-        """
-        return 1 - args[-1]
+        return p * expon.pdf(self.xsp / G, loc=0.1, scale=2.2) + (1 - p) * norm.pdf(self.xsp, loc=G, scale=sigma)
 
-    def exps(self, args):
+    def exps(self, args, A):
         p, G, sigma = args
-        return self.A * p * expon.pdf(self.xsp, loc=0.1 * G, scale=G * 2.2) * self._xsp_width
+        return A * self._bin_width * p * expon.pdf(self.xsp / G, loc=0.1, scale=2.2) * self._xsp_width
     
-    def norms(self, args):
+    def norms(self, args, A):
         p, G, sigma = args
-        return self.A * (1 - p) * norm.pdf(self.xsp, loc=G, scale=sigma) * self._xsp_width
-
-    # --------------
-    # default length
-    # --------------
-    step_length = {'p'         : 0.004,
-                   'G'         : 10,
-                   'sigma'     : 5,
-                   'occupancy' : 0.05}
-
-    def fit(
-        self, 
-        burn_in:int=2500,
-        mc_step:int=5000,
-        seed:int=None,
-        verbose:int=10,
-        track:int=0, 
-        step_length:dict[str, float]=step_length
-    ):
-        """ MCMC fit.
-        
-        Additional Parameters
-        ---------------------
-        step_length : dict
-            keys in the order of ('p', 'G', 'sigma', 'occupancy'),
-            values in float.
-        """
-        super().fit(burn_in, mc_step, seed, verbose, track, step_length)
+        return A * self._bin_width * (1 - p) * norm.pdf(self.xsp, loc=G, scale=sigma) * self._xsp_width
