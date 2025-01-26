@@ -12,31 +12,34 @@ from abc import ABCMeta, abstractmethod
 
 class PMT_Fitter(metaclass=ABCMeta):
     def __init__(
-        self, 
-        hist, 
-        bins, 
-        A, 
-        mu_init = None, 
-        sample = None, 
-        seterr:str = 'warn', 
-        init = None, 
-        bounds = None
+        self,
+        hist,
+        bins,
+        A,
+        mu_init=None,
+        sample=None,
+        seterr: str = "warn",
+        init=None,
+        bounds=None,
     ):
         np.seterr(all=seterr)
-        
+
         self.A = A
-        self.bounds = bounds.tolist() if isinstance(bounds, np.ndarray) else list(bounds)
+        self.bounds = (
+            bounds.tolist() if isinstance(bounds, np.ndarray) else list(bounds)
+        )
         self._init = init if isinstance(init, np.ndarray) else np.array(init)
         occ_init = sum(hist) / A
         self._mu_init = -np.log(1 - occ_init) if mu_init is None else mu_init
-        print(f'mu init: {self._mu_init}')
         # see https://gitlab.airelinux.org/juno/OSIRIS/production/-/issues/48#note_42922
-        self.sample = 16 * int(np.exp(0.673313 * self._mu_init)) if sample is None else sample
+        self.sample = (
+            16 * int(np.exp(0.673313 * self._mu_init)) if sample is None else sample
+        )
 
         self.init = np.append(self._init, self._mu_init)
         self.bounds.append((0.5 * self._mu_init, 1.5 * self._mu_init))
         self.bounds = tuple(self.bounds)
-            
+
         self.hist = hist
         self.bins = bins
         self.zero = A - sum(self.hist)
@@ -45,24 +48,26 @@ class PMT_Fitter(metaclass=ABCMeta):
         self._xs = (self.bins[:-1] + self.bins[1:]) / 2
         self._interval = (self.bins[1] - self.bins[0]) / self.sample
         self._bwds = 1 - int(-self.bins[0] // self._interval)
-        self.xsp = np.linspace(self.bins[0] - self._bwds * self._interval, 
-                               self.bins[-1], 
-                               num=len(self.hist) * self.sample + self._bwds + 1, 
-                               endpoint=True)
+        self.xsp = np.linspace(
+            self.bins[0] - self._bwds * self._interval,
+            self.bins[-1],
+            num=len(self.hist) * self.sample + self._bwds + 1,
+            endpoint=True,
+        )
         self._xsp_width = self.xsp[1] - self.xsp[0]
 
         self.dof = len(init)
         self.ndf = len(self.hist) - self.dof
         self.C = self._log_l_C()
         self._start = time.time()
-        
+
     # ------------
     # staticmethod
     # ------------
 
     def composite_simpson(self, pdf_slice, interval, sample):
-        """ Use composite Simpson to integrate pdf.
-                
+        """Use composite Simpson to integrate pdf.
+
         Parameters
         ----------
         pdf_slice : ArrayLike
@@ -74,8 +79,8 @@ class PMT_Fitter(metaclass=ABCMeta):
         result += 4 * odd_sum + 2 * even_sum
         result *= interval / 3
         return result
-    
-    def isInBound(self, param:float | int, bound:tuple[None | float | int]) -> bool:
+
+    def isInBound(self, param: float | int, bound: tuple[None | float | int]) -> bool:
         assert len(bound) == 2, "Illegal bound!"
         if None not in bound:
             lower, upper = bound
@@ -84,10 +89,10 @@ class PMT_Fitter(metaclass=ABCMeta):
         elif bound == (None, None):
             return True
         elif bound[0] is None:
-            return (param < bound[1])
+            return param < bound[1]
         else:
-            return (param > bound[0])
-        
+            return param > bound[0]
+
     def isParamsInBound(self, params, bounds):
         flag = True
         for p, b in zip(params, bounds):
@@ -95,66 +100,67 @@ class PMT_Fitter(metaclass=ABCMeta):
             if flag == False:
                 return False
         return flag
-    
+
     def get_gain(self, args):
         pass
-    
+
     # --------
     # property
     # --------
-    
+
     def _log_l_C(self):
-        """ Return constant in log likelihood.
-                
+        """Return constant in log likelihood.
+
         Notes
         -----
         C = NlnN - ln(N!) + sum_j(ln(nj!))
         """
         N = sum(self.hist) + self.zero
         N_part = N * np.log(N) - sum(np.log(np.arange(1, N + 1)))
-        n_part = sum([sum(np.log(np.arange(1, n + 1))) 
-                      for n in self.hist]) + sum(np.log(np.arange(1, self.zero + 1)))
+        n_part = sum([sum(np.log(np.arange(1, n + 1))) for n in self.hist]) + sum(
+            np.log(np.arange(1, self.zero + 1))
+        )
         return N_part + n_part
-    
+
     # -----------
     # classmethod
     # -----------
-    
+
     def _pdf(self, args):
         pass
-    
+
     def _zero(self, args):
         return 1 - args[-1]
 
     def const(self, args):
         return 0
-    
+
     def _pdf_sr(self, args):
-        """ Applying DFT & IDFT to estimate pdf.
-                
+        """Applying DFT & IDFT to estimate pdf.
+
         Parameters
         ----------
         args : ArrayLike
             (ser_args_1, ..., ser_args_(dof), mu)
         """
-        ser_args = args[:self.dof]
+        ser_args = args[: self.dof]
         mu = args[self.dof]
         s_sp = fft(self._pdf(ser_args)) * self._xsp_width + self.const(ser_args)
         sr_sp = np.exp(mu * (s_sp - 1))
         sr_sp = np.real(ifft(sr_sp)) / self._xsp_width
         return sr_sp
-    
+
     def _estimate_smooth(self, args):
-        return self.A * self._bin_width * self._pdf_sr(args=args) 
-    
+        return self.A * self._bin_width * self._pdf_sr(args=args)
+
     def _estimate_count(self, args) -> tuple:
-        """ Estimate counts of every bin.
-                
+        """Estimate counts of every bin.
+
         Parameters
         ----------
         args : ArrayLike
             (ser_args_1, ..., ser_args_(dof), mu)
-            
+
         Return
         ------
         y_est : ArrayLike
@@ -163,21 +169,26 @@ class PMT_Fitter(metaclass=ABCMeta):
             Expected zero entries.
         """
         y_sp = self.A * self._pdf_sr(args=args)
-        y_sp_slice = np.array([
-            y_sp[(self._bwds + self.sample * i):(self._bwds + self.sample * (i + 1) + 1)] 
-            for i in range(len(self.hist))])
-        y_est = np.apply_along_axis(self.composite_simpson, 
-                                    1, 
-                                    y_sp_slice, 
-                                    self._interval,
-                                    self.sample)
+        y_sp_slice = np.array(
+            [
+                y_sp[
+                    (self._bwds + self.sample * i) : (
+                        self._bwds + self.sample * (i + 1) + 1
+                    )
+                ]
+                for i in range(len(self.hist))
+            ]
+        )
+        y_est = np.apply_along_axis(
+            self.composite_simpson, 1, y_sp_slice, self._interval, self.sample
+        )
         # nonegative pdf set
         y_est[y_est <= 0] = 1e-16
         z_est = self.A * self._zero(args)
         return y_est, z_est
-    
+
     def log_l(self, args) -> float:
-        """ log likelihood of given args.
+        """log likelihood of given args.
 
         Parameters
         ----------
@@ -191,29 +202,29 @@ class PMT_Fitter(metaclass=ABCMeta):
             return self.zero * np.log(z) + np.sum(self.hist * np.log(y)) - self.C
         else:
             return -np.inf
-        
+
     def get_chi_sq(self, args) -> float:
-        """ Chi square.
+        """Chi square.
 
         Parameters
         ----------
         ser_args : ArrayLike
         occs : ArrayLike
-        """        
+        """
         y, z = self._estimate_count(args)
         return sum((y - self.hist) ** 2 / y) + (z - self.zero) ** 2 / z
-    
+
     def fit(
-        self, 
-        nwalkers:int=32, 
-        burn_in:int=50,
-        step:int=200,
-        seed:int=None,
-        track:int=1, 
-        step_length:dict[str, float]=None
+        self,
+        nwalkers: int = 32,
+        burn_in: int = 50,
+        step: int = 200,
+        seed: int = None,
+        track: int = 1,
+        step_length: dict[str, float] = None,
     ):
-        """ MCMC fit using `emcee`.
-                
+        """MCMC fit using `emcee`.
+
         Parameters
         ----------
         nwalkers : int
@@ -228,48 +239,64 @@ class PMT_Fitter(metaclass=ABCMeta):
             Take only every `track` steps from the chain.
         step_length : dict[str, float]
             Step length to generate initial values.
-            
+
         Notes
         -----
         `nwalkers >= 2 * ndim`, credits to Xuewei.
         """
         if seed is not None:
             np.random.seed(seed)
-        
+
         ndim = self.dof + 1
-        p0 = self.init + np.random.uniform(-1, 1, (nwalkers, ndim)) * list(step_length.values())
-        
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_l, moves=emcee.moves.WalkMove())
+        p0 = self.init + np.random.uniform(-1, 1, (nwalkers, ndim)) * list(
+            step_length.values()
+        )
+
+        sampler = emcee.EnsembleSampler(
+            nwalkers, ndim, self.log_l, moves=emcee.moves.WalkMove()
+        )
         sampler.run_mcmc(p0, step)
-        
+
         acceptance = sampler.acceptance_fraction
         # autocorr_time = sampler.get_autocorr_time(discard=burn_in)
-        
-        self.log_l_track = sampler.get_log_prob(thin=track)                 # (step, nwalkers)
+
+        self.log_l_track = sampler.get_log_prob(thin=track)  # (step, nwalkers)
         # select the max log-likelihood (last 1000 steps) chain
         ind = np.argmax(np.mean(self.log_l_track[-1000:, :], axis=0))
-        self.samples_track = sampler.get_chain(discard=burn_in)[:, ind, :]  # (step, ndim)
-        self.ser_args = np.mean(self.samples_track[:, :self.dof], axis=0)
-        self.ser_args_std = np.std(self.samples_track[:, :self.dof], axis=0)
+        self.samples_track = sampler.get_chain(discard=burn_in)[
+            :, ind, :
+        ]  # (step, ndim)
+        self.ser_args = np.mean(self.samples_track[:, : self.dof], axis=0)
+        self.ser_args_std = np.std(self.samples_track[:, : self.dof], axis=0)
         self.mu = np.mean(self.samples_track[:, -1], axis=0)
         self.mu_std = np.std(self.samples_track[:, -1], axis=0)
         args_complete = np.append(self.ser_args, self.mu)
-        
-        self.gps = np.apply_along_axis(self.get_gain, axis=1, arr=self.samples_track, gain="gp")
-        self.gms = np.apply_along_axis(self.get_gain, axis=1, arr=self.samples_track, gain="gm")
-        
+
+        self.gps = np.apply_along_axis(
+            self.get_gain, axis=1, arr=self.samples_track, gain="gp"
+        )
+        self.gms = np.apply_along_axis(
+            self.get_gain, axis=1, arr=self.samples_track, gain="gm"
+        )
+
         print("----------")
         # print(f'Mean autocorrelation time: {autocorr_time} steps')
-        print(f'Current burn-in: {burn_in} steps')
-        print(f'Mean acceptance fraction: {np.mean(acceptance):.3f}')
-        print(f'Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}')
+        print(f"Current burn-in: {burn_in} steps")
+        print(f"Mean acceptance fraction: {np.mean(acceptance):.3f}")
+        print(f"Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}")
         print("----------")
-        print("SER params: " + ', '.join([f'{e:.4g} pm {f:.4g}' for e, f in zip(self.ser_args, self.ser_args_std)]))
-        print("mu: " + ', '.join([f'{self.mu:.4g} pm {self.mu_std:.4g}']))
-        
+        print(
+            "SER params: "
+            + ", ".join(
+                [
+                    f"{e:.4g} pm {f:.4g}"
+                    for e, f in zip(self.ser_args, self.ser_args_std)
+                ]
+            )
+        )
+        print("mu: " + ", ".join([f"{self.mu:.4g} pm {self.mu_std:.4g}"]))
+
         self.likelihood = self.log_l(args_complete)
-        self.gains_mean = np.mean(self.gms)
-        self.gains_std = np.std(self.gms)
         self.BIC = ndim * np.log(len(self.hist) + 1) - 2 * self.likelihood
         self.chi_sq = self.get_chi_sq(args_complete)
         self.smooth = self._estimate_smooth(args_complete)
@@ -277,8 +304,8 @@ class PMT_Fitter(metaclass=ABCMeta):
 
 
 class MCP_Fitter(PMT_Fitter):
-    """ A class to fit MCP-PMT charge spectrum.
-    
+    """A class to fit MCP-PMT charge spectrum.
+
     Parameters
     ----------
     charge : ArrayLike
@@ -293,52 +320,51 @@ class MCP_Fitter(PMT_Fitter):
         the upper cut (lower cut optional), expressed with the ratio divided by main peak
     init : ArrayLike
         initial params of SER charge model, in the order of
-        "main peak ratio, main peak k/shape, main peak theta/rate, 
+        "main peak ratio, main peak k/shape, main peak theta/rate,
         secondary electron number, secondary alpha/shape, secondary beta/rate"
     bounds : ArrayLike
         initial bounds of SER charge model, secondary within 3 sigma
     seterr : {'ignore', 'warn', 'raise', 'call', 'print', 'log'}
         see https://numpy.org/doc/stable/reference/generated/numpy.seterr.html
     """
+
     def __init__(
-        self, 
-        hist, 
-        bins, 
-        A, 
-        mu_init = None, 
-        sample = None, 
-        seterr: str = 'warn', 
-        init = 
-        [
-            .65,          # main peak ratio
-            15.0,         # main peak k/shape
-            52.0,         # main peak theta/scale
-            4.0,          # secondary electron number
-            0.60,         # secondary electron mean / Q1
-            0.15          # secondary electron std variance / Q1
-        ], 
-        bounds = 
-        [
-            (.35, 1),
-            (1, None),    # alpha > 1 to ensure peak
-            (0, None),    # beta > 0
-            (3, 7),       # secondary
-            (0.3, 0.7),   # mean / Q1 based on Jun's work
-            (0.05, 0.3)   # std variance / Q1 based on Jun's work
-        ]
+        self,
+        hist,
+        bins,
+        A,
+        mu_init=None,
+        sample=None,
+        seterr: str = "warn",
+        init=[
+            0.65,  # main peak ratio
+            15.0,  # main peak k/shape
+            52.0,  # main peak theta/scale
+            4.0,  # secondary electron number
+            0.60,  # secondary electron mean / Q1
+            0.15,  # secondary electron std variance / Q1
+        ],
+        bounds=[
+            (0.35, 1),
+            (1, None),  # alpha > 1 to ensure peak
+            (0, None),  # beta > 0
+            (3, 7),  # secondary
+            (0.3, 0.7),  # mean / Q1 based on Jun's work
+            (0.05, 0.3),  # std variance / Q1 based on Jun's work
+        ],
     ):
         super().__init__(hist, bins, A, mu_init, sample, seterr, init, bounds)
-    
+
     # ------------
     # staticmethod
     # ------------
 
     def const(self, args):
         return (1 - args[0]) * np.exp(-args[3])
-    
-    def get_gain(self, args, gain:str="gm"):
-        """ Return gain of MCP.
-        
+
+    def get_gain(self, args, gain: str = "gm"):
+        """Return gain of MCP.
+
         Parameters
         ----------
         ser_args : ArrayLike.
@@ -355,12 +381,12 @@ class MCP_Fitter(PMT_Fitter):
                     calibrated on 8-inches, the mean of secondary Gamma gain / Q1
                 std_variance : float
                     calibrated on 8-inches, the std variance of secondary Gamma gain / Q1
-                    
+
         Return
         ------
         gain : float
             Gain of MCP.
-            
+
         Notes
         -----
         Return mean of SPE distribution (Gm) by default.
@@ -368,14 +394,16 @@ class MCP_Fitter(PMT_Fitter):
         if gain == "gp":
             return args[1] * args[2]
         elif gain == "gm":
-            return (args[0] * args[1] * args[2] + 
-                    (1 - args[0]) * args[1] * args[2] * args[3] * args[4])
+            return (
+                args[0] * args[1] * args[2]
+                + (1 - args[0]) * args[1] * args[2] * args[3] * args[4]
+            )
         else:
-            raise NameError(f'{gain} is not a illegal parameter!')
-    
+            raise NameError(f"{gain} is not a illegal parameter!")
+
     def _map_args(self, args) -> tuple:
-        """ Map MCP-PMT SER/SPE charge model parameters.
-        
+        """Map MCP-PMT SER/SPE charge model parameters.
+
         Parameters
         ----------
         args : ArrayLike.
@@ -392,7 +420,7 @@ class MCP_Fitter(PMT_Fitter):
                     calibrated on 8-inches, the mean of secondary Gamma gain / Q1
                 std_variance : float
                     calibrated on 8-inches, the std variance of secondary Gamma gain / Q1
-                    
+
         Return
         ------
         result : tuple
@@ -409,68 +437,74 @@ class MCP_Fitter(PMT_Fitter):
                     power of tweedie (1 < p < 2)
                 phi : float
                     variance param of tweedie (var = phi * mu^p)
-            
+
         Notes
         -----
         True secondary (ts) `q/q1 ~ GA(alpha_ts, beta_ts)` -> `q ~ GA(alpha_ts, beta_ts / q1)`;
-        True secondary parameters mapping see: 
+        True secondary parameters mapping see:
         https://en.wikipedia.org/wiki/Compound_Poisson_distribution
         """
         frac, k, theta, lam, mean, std_variance = args
-        alpha_ts = (mean ** 2) / (std_variance ** 2)
-        beta_ts = mean / (std_variance ** 2)
+        alpha_ts = (mean**2) / (std_variance**2)
+        beta_ts = mean / (std_variance**2)
         Q1 = k * theta
         mu = lam * alpha_ts * Q1 / beta_ts
         p = 1 + 1 / (alpha_ts + 1)
         phi = (alpha_ts + 1) * pow(lam * alpha_ts, 1 - p) / pow(beta_ts / Q1, 2 - p)
-        return (frac, k, theta, mu, p, phi)  
-        
+        return (frac, k, theta, mu, p, phi)
+
     def _pdf_gm(self, x, frac, k, theta):
         return frac * gamma.pdf(x, a=k, scale=theta)
-        
+
     def _pdf_tw(self, x, frac, mu, p, phi):
         inreg = sum(x <= 0)
-        pdf = (1 - frac) * tweedie_reckon(x[inreg:], p=p, mu=mu, phi=phi, dlambda=False)[0]
+        pdf = (1 - frac) * tweedie_reckon(
+            x[inreg:], p=p, mu=mu, phi=phi, dlambda=False
+        )[0]
         for _ in range(inreg):
             pdf = np.insert(pdf, 0, 0)
         return pdf
-    
+
     # --------
     # property
     # --------
-    
+
     def Gms(self, args, A):
         frac, k, theta = args[:3]
         return A * self._bin_width * self._pdf_gm(self.xsp, frac=frac, k=k, theta=theta)
-    
+
     def Tws(self, args, A):
         frac, _, _, mu, p, phi = self._map_args(args)
-        return A * self._bin_width * self._pdf_tw(self.xsp, frac=frac, mu=mu, p=p, phi=phi)
-    
+        return (
+            A * self._bin_width * self._pdf_tw(self.xsp, frac=frac, mu=mu, p=p, phi=phi)
+        )
+
     # -----------
     # classmethod
     # -----------
-    
+
     def _pdf(self, args):
         frac, k, theta, mu, p, phi = self._map_args(args)
-        return self._pdf_gm(self.xsp, frac, k, theta) + self._pdf_tw(self.xsp, frac, mu, p, phi)
-    
+        return self._pdf_gm(self.xsp, frac, k, theta) + self._pdf_tw(
+            self.xsp, frac, mu, p, phi
+        )
+
     def _zero(self, args):
-        """ MCP-PMT SER/SPE charge model zero charge count.
-                
+        """MCP-PMT SER/SPE charge model zero charge count.
+
         Parameters
         ----------
         args : ArrayLike
             (frac, k, theta, lam, mean, std_variance, mu)
         """
-        frac, _, _, lam, _, _ = args[:self.dof]
+        frac, _, _, lam, _, _ = args[: self.dof]
         mu = args[self.dof]
         return np.exp(mu * ((1 - frac) * np.exp(-lam) - 1))
-        
-        
+
+
 class Dynode_Fitter(PMT_Fitter):
-    """ A class to fit Dynode PMT charge spectrum.
-    
+    """A class to fit Dynode PMT charge spectrum.
+
     Parameters
     ----------
     charge : ArrayLike
@@ -491,34 +525,33 @@ class Dynode_Fitter(PMT_Fitter):
     seterr : {'ignore', 'warn', 'raise', 'call', 'print', 'log'}
         see https://numpy.org/doc/stable/reference/generated/numpy.seterr.html
     """
+
     def __init__(
-        self, 
-        hist, 
-        bins, 
-        A, 
-        mu_init, 
-        sample = None, 
-        seterr: str = 'warn', 
-        init =
-        [
-            20,        # peak k/shape
-            40,        # peak theta/scale
-        ], 
-        bounds =
-        [
+        self,
+        hist,
+        bins,
+        A,
+        mu_init,
+        sample=None,
+        seterr: str = "warn",
+        init=[
+            20,  # peak k/shape
+            40,  # peak theta/scale
+        ],
+        bounds=[
             (1, None),  # k > 1 to ensure peak
             (0, None),  # theta > 0
-        ]
+        ],
     ):
         super().__init__(hist, bins, A, mu_init, sample, seterr, init, bounds)
-    
+
     # ------------
     # staticmethod
     # ------------
-    
-    def get_gain(self, args, gain:str="gm"):
-        """ Return gain of MCP.
-        
+
+    def get_gain(self, args, gain: str = "gm"):
+        """Return gain of MCP.
+
         Parameters
         ----------
         ser_args : ArrayLike.
@@ -527,12 +560,12 @@ class Dynode_Fitter(PMT_Fitter):
                     peak shape in Gamma distribution
                 scale : float
                     peak scale in Gamma distribution
-        
+
         Return
         ------
         gain : float
             Gain of dynode PMT.
-            
+
         Notes
         -----
         Return mean of SPE distribution (Gm) by default.
@@ -542,19 +575,19 @@ class Dynode_Fitter(PMT_Fitter):
         elif gain == "gm":
             return args[0] * args[1]
         else:
-            raise NameError(f'{gain} is not a illegal parameter!')
-    
+            raise NameError(f"{gain} is not a illegal parameter!")
+
     # -----------
     # classmethod
     # -----------
-    
+
     def _pdf(self, args):
         return gamma.pdf(self.xsp, a=args[0], scale=args[1])
-    
+
 
 class Mixture_Fitter(PMT_Fitter):
-    """ A class to fit Dynode PMT charge spectrum.
-    
+    """A class to fit Dynode PMT charge spectrum.
+
     Parameters
     ----------
     charge : ArrayLike
@@ -575,37 +608,36 @@ class Mixture_Fitter(PMT_Fitter):
     seterr : {'ignore', 'warn', 'raise', 'call', 'print', 'log'}
         see https://numpy.org/doc/stable/reference/generated/numpy.seterr.html
     """
+
     def __init__(
-        self, 
-        hist, 
-        bins, 
-        A, 
-        occ_init, 
-        sample = None, 
-        cut: float | tuple[float] = (0.2, 5), 
-        seterr: str = 'warn', 
-        init =
-        [
+        self,
+        hist,
+        bins,
+        A,
+        occ_init,
+        sample=None,
+        cut: float | tuple[float] = (0.2, 5),
+        seterr: str = "warn",
+        init=[
             5e-04,
             800,
             200,
-        ], 
-        bounds =
-        [
+        ],
+        bounds=[
             (1e-04, 3e-03),
             (600, 1200),
             (0, 400),
-        ]
+        ],
     ):
         super().__init__(hist, bins, A, occ_init, sample, cut, seterr, init, bounds)
-    
+
     # ------------
     # staticmethod
     # ------------
-    
-    def get_gain(self, args, gain:str="gm"):
-        """ Return gain of MCP.
-        
+
+    def get_gain(self, args, gain: str = "gm"):
+        """Return gain of MCP.
+
         Parameters
         ----------
         ser_args : ArrayLike.
@@ -616,12 +648,12 @@ class Mixture_Fitter(PMT_Fitter):
                     gain
                 sigma : float
                     sigma of gain
-        
+
         Return
         ------
         gain : float
             Gain of dynode PMT.
-            
+
         Notes
         -----
         Return mean of SPE distribution (Gm) by default.
@@ -631,20 +663,34 @@ class Mixture_Fitter(PMT_Fitter):
         elif gain == "gm":
             return args[0] * args[1] + (1 - args[0]) * args[1] * 2.3
         else:
-            raise NameError(f'{gain} is not a illegal parameter!')
-    
+            raise NameError(f"{gain} is not a illegal parameter!")
+
     # -----------
     # classmethod
     # -----------
-    
+
     def _pdf(self, args):
         p, G, sigma = args
-        return p * expon.pdf(self.xsp / G, loc=0.1, scale=2.2) + (1 - p) * norm.pdf(self.xsp, loc=G, scale=sigma)
+        return p * expon.pdf(self.xsp / G, loc=0.1, scale=2.2) + (1 - p) * norm.pdf(
+            self.xsp, loc=G, scale=sigma
+        )
 
     def exps(self, args, A):
         p, G, sigma = args
-        return A * self._bin_width * p * expon.pdf(self.xsp / G, loc=0.1, scale=2.2) * self._xsp_width
-    
+        return (
+            A
+            * self._bin_width
+            * p
+            * expon.pdf(self.xsp / G, loc=0.1, scale=2.2)
+            * self._xsp_width
+        )
+
     def norms(self, args, A):
         p, G, sigma = args
-        return A * self._bin_width * (1 - p) * norm.pdf(self.xsp, loc=G, scale=sigma) * self._xsp_width
+        return (
+            A
+            * self._bin_width
+            * (1 - p)
+            * norm.pdf(self.xsp, loc=G, scale=sigma)
+            * self._xsp_width
+        )
