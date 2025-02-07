@@ -57,7 +57,6 @@ class PMT_Fitter(metaclass=ABCMeta):
         self._xsp_width = self.xsp[1] - self.xsp[0]
 
         self.dof = len(init)
-        self.ndf = len(self.hist) - self.dof
         self.C = self._log_l_C()
         self._start = time.time()
 
@@ -101,8 +100,18 @@ class PMT_Fitter(metaclass=ABCMeta):
                 return False
         return flag
 
-    def get_gain(self, args):
-        pass
+    def merge_bins(self, hist, y):
+        ind = np.argmax(hist <= 5)
+        if ind != 0:
+            cnt_after = sum(hist[ind:])
+            if cnt_after > 5:
+                hist_merged = np.append(hist[:ind], cnt_after)
+                y_merged = np.append(y[:ind], sum(y[ind:]))
+            else:
+                hist_merged = np.append(hist[: ind - 1], cnt_after + hist[ind])
+                y_merged = np.append(y[: ind - 1], sum(y[ind - 1 :]))
+            return hist_merged, y_merged
+        return hist, y
 
     # --------
     # property
@@ -134,6 +143,9 @@ class PMT_Fitter(metaclass=ABCMeta):
 
     def const(self, args):
         return 0
+
+    def get_gain(self, args):
+        pass
 
     def _pdf_sr(self, args):
         """Applying DFT & IDFT to estimate pdf.
@@ -212,7 +224,9 @@ class PMT_Fitter(metaclass=ABCMeta):
         occs : ArrayLike
         """
         y, z = self._estimate_count(args)
-        return sum((y - self.hist) ** 2 / y) + (z - self.zero) ** 2 / z
+        hist_reg, y_reg = self.merge_bins(self.hist, y)
+        self.ndf = len(hist_reg) - self.dof
+        return sum((y_reg - hist_reg) ** 2 / y) + (z - self.zero) ** 2 / z
 
     def fit(
         self,
