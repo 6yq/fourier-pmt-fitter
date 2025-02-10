@@ -37,7 +37,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         )
 
         self.init = np.append(self._init, self._mu_init)
-        self.bounds.append((0.5 * self._mu_init, 1.5 * self._mu_init))
+        self.bounds.append((0, 2 * self._mu_init))
         self.bounds = tuple(self.bounds)
 
         self.hist = hist
@@ -226,7 +226,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         y, z = self._estimate_count(args)
         hist_reg, y_reg = self.merge_bins(self.hist, y)
         self.ndf = len(hist_reg) - self.dof
-        return sum((y_reg - hist_reg) ** 2 / y) + (z - self.zero) ** 2 / z
+        return sum((y_reg - hist_reg) ** 2 / y_reg) + (z - self.zero) ** 2 / z
 
     def fit(
         self,
