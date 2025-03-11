@@ -16,7 +16,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         hist,
         bins,
         A,
-        mu_init=None,
+        occ_init=None,
         sample=None,
         seterr: str = "warn",
         init=None,
@@ -29,19 +29,18 @@ class PMT_Fitter(metaclass=ABCMeta):
             bounds.tolist() if isinstance(bounds, np.ndarray) else list(bounds)
         )
         self._init = init if isinstance(init, np.ndarray) else np.array(init)
-        occ_init = sum(hist) / A
-        self._mu_init = -np.log(1 - occ_init) if mu_init is None else mu_init
+        self._occ_init = sum(hist) / A if occ_init is None else occ_init
         # see https://gitlab.airelinux.org/juno/OSIRIS/production/-/issues/48#note_42922
         self.sample = (
-            16 * int(np.exp(0.673313 * self._mu_init)) if sample is None else sample
+            16 * int(1 / (1 - self._occ_init) ** 0.673313) if sample is None else sample
         )
 
-        self.init = np.append(self._init, self._mu_init)
-        self.bounds.append((0, 2 * self._mu_init))
+        self.init = np.append(self._init, self._occ_init)
+        self.bounds.append((0, 1))
         self.bounds = tuple(self.bounds)
 
-        self.hist = hist
-        self.bins = bins
+        self.hist = hist if isinstance(hist, np.ndarray) else np.array(hist)
+        self.bins = bins if isinstance(bins, np.ndarray) else np.array(bins)
         self.zero = A - sum(self.hist)
         # there is no need to check these variables outside the class
         self._bin_width = self.bins[1] - self.bins[0]
@@ -156,9 +155,8 @@ class PMT_Fitter(metaclass=ABCMeta):
             (ser_args_1, ..., ser_args_(dof), mu)
         """
         ser_args = args[: self.dof]
-        mu = args[self.dof]
         s_sp = fft(self._pdf(ser_args)) * self._xsp_width + self.const(ser_args)
-        sr_sp = np.exp(mu * (s_sp - 1))
+        sr_sp = np.exp(-np.log(1 - args[self.dof]) * (s_sp - 1))
         sr_sp = np.real(ifft(sr_sp)) / self._xsp_width
         return sr_sp
 
@@ -282,9 +280,9 @@ class PMT_Fitter(metaclass=ABCMeta):
         ]  # (step, ndim)
         self.ser_args = np.mean(self.samples_track[:, : self.dof], axis=0)
         self.ser_args_std = np.std(self.samples_track[:, : self.dof], axis=0)
-        self.mu = np.mean(self.samples_track[:, -1], axis=0)
-        self.mu_std = np.std(self.samples_track[:, -1], axis=0)
-        args_complete = np.append(self.ser_args, self.mu)
+        self.occ = np.mean(self.samples_track[:, -1], axis=0)
+        self.occ_std = np.std(self.samples_track[:, -1], axis=0)
+        args_complete = np.append(self.ser_args, self.occ)
 
         self.gps = np.apply_along_axis(
             self.get_gain, axis=1, arr=self.samples_track, gain="gp"
@@ -308,7 +306,7 @@ class PMT_Fitter(metaclass=ABCMeta):
                 ]
             )
         )
-        print("mu: " + ", ".join([f"{self.mu:.4g} pm {self.mu_std:.4g}"]))
+        print("occ: " + ", ".join([f"{self.occ:.4g} pm {self.occ_std:.4g}"]))
 
         self.likelihood = self.log_l(args_complete)
         self.BIC = ndim * np.log(len(self.hist) + 1) - 2 * self.likelihood
@@ -347,7 +345,7 @@ class MCP_Fitter(PMT_Fitter):
         hist,
         bins,
         A,
-        mu_init=None,
+        occ_init=None,
         sample=None,
         seterr: str = "warn",
         init=[
@@ -367,7 +365,7 @@ class MCP_Fitter(PMT_Fitter):
             (0.05, 0.3),  # std variance / Q1 based on Jun's work
         ],
     ):
-        super().__init__(hist, bins, A, mu_init, sample, seterr, init, bounds)
+        super().__init__(hist, bins, A, occ_init, sample, seterr, init, bounds)
 
     # ------------
     # staticmethod
@@ -509,10 +507,10 @@ class MCP_Fitter(PMT_Fitter):
         Parameters
         ----------
         args : ArrayLike
-            (frac, k, theta, lam, mean, std_variance, mu)
+            (frac, k, theta, lam, mean, std_variance, occupancy)
         """
         frac, _, _, lam, _, _ = args[: self.dof]
-        mu = args[self.dof]
+        mu = -np.log(1 - args[self.dof])
         return np.exp(mu * ((1 - frac) * np.exp(-lam) - 1))
 
 
@@ -526,7 +524,7 @@ class Dynode_Fitter(PMT_Fitter):
     A : ArrayLike
         total charge count
     occ_init : ArrayLike
-        initial mu
+        initial occupancy
     sample : int
         the number of sample intervals between bins
     cut : float or tuple[float]
@@ -545,7 +543,7 @@ class Dynode_Fitter(PMT_Fitter):
         hist,
         bins,
         A,
-        mu_init,
+        occ_init,
         sample=None,
         seterr: str = "warn",
         init=[
@@ -557,7 +555,7 @@ class Dynode_Fitter(PMT_Fitter):
             (0, None),  # theta > 0
         ],
     ):
-        super().__init__(hist, bins, A, mu_init, sample, seterr, init, bounds)
+        super().__init__(hist, bins, A, occ_init, sample, seterr, init, bounds)
 
     # ------------
     # staticmethod
