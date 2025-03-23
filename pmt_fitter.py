@@ -604,9 +604,7 @@ class Dynode_Fitter(PMT_Fitter):
         -----
         Return mean of SPE distribution (Gm) by default.
         """
-        if gain == "gp":
-            return (args[0] - 1) * args[1]
-        elif gain == "gm":
+        if gain == "gp" or gain == "gm":
             return args[0] * args[1]
         else:
             raise NameError(f"{gain} is not a illegal parameter!")
