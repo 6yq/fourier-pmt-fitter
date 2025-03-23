@@ -99,18 +99,40 @@ class PMT_Fitter(metaclass=ABCMeta):
                 return False
         return flag
 
-    def merge_bins(self, hist, y):
-        ind = np.argmax(hist <= 5)
-        if ind != 0:
-            cnt_after = sum(hist[ind:])
-            if cnt_after > 5:
-                hist_merged = np.append(hist[:ind], cnt_after)
-                y_merged = np.append(y[:ind], sum(y[ind:]))
-            else:
-                hist_merged = np.append(hist[: ind - 1], cnt_after + hist[ind])
-                y_merged = np.append(y[: ind - 1], sum(y[ind - 1 :]))
-            return hist_merged, y_merged
-        return hist, y
+    def merge_bins(self, hist, y, threshold=5):
+        hist_ = hist.copy()
+        y_ = y.copy()
+
+        while True:
+            peak_idx = np.argmax(hist_)
+            idx = np.where(hist_ <= threshold)[0]
+            if idx.size == 0:
+                break
+
+            idx = idx[0]
+            merged = False
+
+            if idx < peak_idx:
+                hist_tmp = np.append(hist_[:idx], sum(hist_[idx : idx + 2]))
+                hist_ = np.append(hist_tmp, hist_[idx + 2 :])
+
+                y_tmp = np.append(y_[:idx], sum(y_[idx : idx + 2]))
+                y_ = np.append(y_tmp, y_[idx + 2 :])
+
+                merged = True
+            elif idx > peak_idx:
+                idx = np.where(hist_ <= threshold)[0][-1]
+                hist_tmp = np.append(hist_[: idx - 1], sum(hist_[idx - 1 : idx + 1]))
+                hist_ = np.append(hist_tmp, hist_[idx + 1 :])
+
+                y_tmp = np.append(y_[: idx - 1], sum(y_[idx - 1 : idx + 1]))
+                y_ = np.append(y_tmp, y_[idx + 1 :])
+
+                merged = True
+            if not merged:
+                break
+
+        return hist_, y_
 
     # --------
     # property
