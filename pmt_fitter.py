@@ -6,10 +6,9 @@ from scipy.stats import gamma
 from scipy.fft import fft, ifft
 from scipy.signal import find_peaks
 from tweedie_pdf import tweedie_reckon
-from abc import ABCMeta, abstractmethod
 
 
-class PMT_Fitter(metaclass=ABCMeta):
+class PMT_Fitter:
     def __init__(
         self,
         hist,
@@ -173,7 +172,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), mu)
+            (ser_args_1, ..., ser_args_(dof), occ)
         """
         ser_args = args[: self.dof]
         s_sp = fft(self._pdf(ser_args)) * self._xsp_width + self.const(ser_args)
@@ -181,8 +180,32 @@ class PMT_Fitter(metaclass=ABCMeta):
         sr_sp = np.real(ifft(sr_sp)) / self._xsp_width
         return sr_sp
 
+    def _pdf_sr_n(self, args, n):
+        """Return n-order pdf.
+
+        Parameters
+        ----------
+        args : ArrayLike
+            (ser_args_1, ..., ser_args_(dof), occ)
+        n : int
+            nPE
+
+        Notes
+        -----
+        nPE contributes exp(-mu) / k! * [mu * s_sp]^k
+        """
+        ser_args = args[: self.dof]
+        s_sp = fft(self._pdf(ser_args)) * self._xsp_width + self.const(ser_args)
+        mu = -np.log(1 - args[self.dof])
+        sr_sp_n = np.exp(-mu) * (mu * s_sp) ** n / np.prod(range(1, n + 1))
+        sr_sp_n = np.real(ifft(sr_sp_n)) / self._xsp_width
+        return sr_sp_n
+
     def _estimate_smooth(self, args):
         return self.A * self._bin_width * self._pdf_sr(args=args)
+
+    def estimate_smooth_n(self, args, n):
+        return self.A * self._bin_width * self._pdf_sr_n(args=args, n=n)
 
     def _estimate_count(self, args) -> tuple:
         """Estimate counts of every bin.
@@ -190,7 +213,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), mu)
+            (ser_args_1, ..., ser_args_(dof), occ)
 
         Return
         ------
@@ -224,7 +247,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), mu)
+            (ser_args_1, ..., ser_args_(dof), occ)
         """
         # make sure args are in range
         # otherwise an infinite "well"
@@ -346,7 +369,7 @@ class MCP_Fitter(PMT_Fitter):
     A : ArrayLike
         total charge count
     occ_init : ArrayLike
-        initial mu
+        initial occupancy
     sample : int
         the number of sample intervals between bins
     cut : float or tuple[float]
@@ -500,16 +523,22 @@ class MCP_Fitter(PMT_Fitter):
     # property
     # --------
 
-    def Gms(self, args, A):
+    def Gms(self, args):
         frac, mean, sigma = args[:3]
         k = (mean / sigma) ** 2
         theta = mean / k
-        return A * self._bin_width * self._pdf_gm(self.xsp, frac=frac, k=k, theta=theta)
+        return (
+            self.A
+            * self._bin_width
+            * self._pdf_gm(self.xsp, frac=frac, k=k, theta=theta)
+        )
 
-    def Tws(self, args, A):
+    def Tws(self, args):
         frac, _, _, mu, p, phi = self._map_args(args)
         return (
-            A * self._bin_width * self._pdf_tw(self.xsp, frac=frac, mu=mu, p=p, phi=phi)
+            self.A
+            * self._bin_width
+            * self._pdf_tw(self.xsp, frac=frac, mu=mu, p=p, phi=phi)
         )
 
     # -----------
