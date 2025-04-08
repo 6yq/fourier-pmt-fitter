@@ -2,7 +2,6 @@ import time
 import emcee
 import numpy as np
 
-from tweedie import tweedie
 from scipy.stats import gamma
 from scipy.fft import fft, ifft
 from scipy.signal import find_peaks
@@ -372,16 +371,16 @@ class MCP_Fitter(PMT_Fitter):
         seterr: str = "warn",
         init=[
             0.65,  # main peak ratio
-            15.0,  # main peak k/shape
-            52.0,  # main peak theta/scale
+            400,  # main peak mean
+            100,  # main peak sigma
             4.0,  # secondary electron number
             0.60,  # secondary electron mean / Q1
             0.15,  # secondary electron std variance / Q1
         ],
         bounds=[
             (0.35, 1),
-            (1, None),  # alpha > 1 to ensure peak
-            (0, None),  # beta > 0
+            (0, None),  # mean
+            (0, None),  # sigma
             (3, 7),  # secondary
             (0.3, 0.7),  # mean / Q1 based on Jun's work
             (0.05, 0.3),  # std variance / Q1 based on Jun's work
@@ -405,15 +404,15 @@ class MCP_Fitter(PMT_Fitter):
             Elements:
                 frac : float
                     ratio of peak
-                shape : float
-                    main peak, shape in Gamma distribution
-                scale : float
-                    main peak, scale in Gamma distribution
+                mean : float
+                    main peak, mean in Gamma distribution
+                sigma : float
+                    main peak, sigma in Gamma distribution
                 lam : float
                     mean of secondary electron numbers
-                mean : float
+                mean_t : float
                     calibrated on 8-inches, the mean of secondary Gamma gain / Q1
-                std_variance : float
+                sigma_t : float
                     calibrated on 8-inches, the std variance of secondary Gamma gain / Q1
 
         Return
@@ -426,12 +425,9 @@ class MCP_Fitter(PMT_Fitter):
         Return mean of SPE distribution (Gm) by default.
         """
         if gain == "gp":
-            return args[1] * args[2]
+            return args[1]
         elif gain == "gm":
-            return (
-                args[0] * args[1] * args[2]
-                + (1 - args[0]) * args[1] * args[2] * args[3] * args[4]
-            )
+            return args[0] * args[1] + (1 - args[0]) * args[1] * args[3] * args[4]
         else:
             raise NameError(f"{gain} is not a illegal parameter!")
 
@@ -444,15 +440,15 @@ class MCP_Fitter(PMT_Fitter):
             Elements:
                 frac : float
                     ratio of peak
-                shape : float
-                    main peak, shape in Gamma distribution
-                scale : float
-                    main peak, scale in Gamma distribution
+                mean : float
+                    main peak, mean in Gamma distribution
+                sigma : float
+                    main peak, sigma in Gamma distribution
                 lam : float
                     mean of secondary electron numbers
-                mean : float
+                mean_t : float
                     calibrated on 8-inches, the mean of secondary Gamma gain / Q1
-                std_variance : float
+                sigma_t : float
                     calibrated on 8-inches, the std variance of secondary Gamma gain / Q1
 
         Return
@@ -478,13 +474,14 @@ class MCP_Fitter(PMT_Fitter):
         True secondary parameters mapping see:
         https://en.wikipedia.org/wiki/Compound_Poisson_distribution
         """
-        frac, k, theta, lam, mean, std_variance = args
-        alpha_ts = (mean**2) / (std_variance**2)
-        beta_ts = mean / (std_variance**2)
-        Q1 = k * theta
-        mu = lam * alpha_ts * Q1 / beta_ts
+        frac, mean, sigma, lam, mean_t, sigma_t = args
+        alpha_ts = (mean_t**2) / (sigma_t**2)
+        beta_ts = mean_t / (sigma_t**2)
+        k = (mean / sigma) ** 2
+        theta = mean / k
+        mu = lam * alpha_ts * mean / beta_ts
         p = 1 + 1 / (alpha_ts + 1)
-        phi = (alpha_ts + 1) * pow(lam * alpha_ts, 1 - p) / pow(beta_ts / Q1, 2 - p)
+        phi = (alpha_ts + 1) * pow(lam * alpha_ts, 1 - p) / pow(beta_ts / mean, 2 - p)
         return (frac, k, theta, mu, p, phi)
 
     def _pdf_gm(self, x, frac, k, theta):
@@ -504,7 +501,9 @@ class MCP_Fitter(PMT_Fitter):
     # --------
 
     def Gms(self, args, A):
-        frac, k, theta = args[:3]
+        frac, mean, sigma = args[:3]
+        k = (mean / sigma) ** 2
+        theta = mean / k
         return A * self._bin_width * self._pdf_gm(self.xsp, frac=frac, k=k, theta=theta)
 
     def Tws(self, args, A):
