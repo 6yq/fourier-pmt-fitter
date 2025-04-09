@@ -293,7 +293,7 @@ class PMT_Fitter:
             Seed for random.
         track : int
             Take only every `track` steps from the chain.
-        step_length : dict[str, float]
+        step_length : ndarray[float]
             Step length to generate initial values.
 
         Notes
@@ -304,9 +304,7 @@ class PMT_Fitter:
             np.random.seed(seed)
 
         ndim = self.dof + 1
-        p0 = self.init + np.random.uniform(-1, 1, (nwalkers, ndim)) * list(
-            step_length.values()
-        )
+        p0 = self.init + np.random.uniform(-1, 1, (nwalkers, ndim)) * step_length
 
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, self.log_l, moves=emcee.moves.WalkMove()
