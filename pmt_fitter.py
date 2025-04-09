@@ -522,20 +522,26 @@ class MCP_Fitter(PMT_Fitter):
     # property
     # --------
 
-    def Gms(self, args):
+    def Gms(self, args, occ):
         frac, mean, sigma = args[:3]
         k = (mean / sigma) ** 2
         theta = mean / k
+        mu_l = -np.log(1 - occ)
         return (
             self.A
+            * mu_l
+            * np.exp(-mu_l)
             * self._bin_width
             * self._pdf_gm(self.xsp, frac=frac, k=k, theta=theta)
         )
 
-    def Tws(self, args):
+    def Tws(self, args, occ):
         frac, _, _, mu, p, phi = self._map_args(args)
+        mu_l = -np.log(1 - occ)
         return (
             self.A
+            * mu_l
+            * np.exp(-mu_l)
             * self._bin_width
             * self._pdf_tw(self.xsp, frac=frac, mu=mu, p=p, phi=phi)
         )
