@@ -597,12 +597,12 @@ class Dynode_Fitter(PMT_Fitter):
         sample=None,
         seterr: str = "warn",
         init=[
-            20,  # peak k/shape
-            40,  # peak theta/scale
+            600,  # peak mean
+            40,  # peak sigma
         ],
         bounds=[
-            (1, None),  # k > 1 to ensure peak
-            (0, None),  # theta > 0
+            (0, None),
+            (0, None),
         ],
     ):
         super().__init__(hist, bins, A, occ_init, sample, seterr, init, bounds)
@@ -633,7 +633,7 @@ class Dynode_Fitter(PMT_Fitter):
         Return mean of SPE distribution (Gm) by default.
         """
         if gain == "gp" or gain == "gm":
-            return args[0] * args[1]
+            return args[0]
         else:
             raise NameError(f"{gain} is not a illegal parameter!")
 
@@ -642,7 +642,10 @@ class Dynode_Fitter(PMT_Fitter):
     # -----------
 
     def _pdf(self, args):
-        return gamma.pdf(self.xsp, a=args[0], scale=args[1])
+        mean, sigma = args
+        k = (mean / sigma) ** 2
+        theta = mean / k
+        return gamma.pdf(self.xsp, a=k, scale=theta)
 
 
 class Mixture_Fitter(PMT_Fitter):
