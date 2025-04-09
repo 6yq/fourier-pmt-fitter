@@ -6,10 +6,9 @@ from scipy.stats import gamma
 from scipy.fft import fft, ifft
 from scipy.signal import find_peaks
 from tweedie_pdf import tweedie_reckon
-from abc import ABCMeta, abstractmethod
 
 
-class PMT_Fitter(metaclass=ABCMeta):
+class PMT_Fitter:
     def __init__(
         self,
         hist,
@@ -173,7 +172,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), mu)
+            (ser_args_1, ..., ser_args_(dof), occ)
         """
         ser_args = args[: self.dof]
         s_sp = fft(self._pdf(ser_args)) * self._xsp_width + self.const(ser_args)
@@ -181,8 +180,32 @@ class PMT_Fitter(metaclass=ABCMeta):
         sr_sp = np.real(ifft(sr_sp)) / self._xsp_width
         return sr_sp
 
+    def _pdf_sr_n(self, args, n):
+        """Return n-order pdf.
+
+        Parameters
+        ----------
+        args : ArrayLike
+            (ser_args_1, ..., ser_args_(dof), occ)
+        n : int
+            nPE
+
+        Notes
+        -----
+        nPE contributes exp(-mu) / k! * [mu * s_sp]^k
+        """
+        ser_args = args[: self.dof]
+        s_sp = fft(self._pdf(ser_args)) * self._xsp_width + self.const(ser_args)
+        mu = -np.log(1 - args[self.dof])
+        sr_sp_n = np.exp(-mu) * (mu * s_sp) ** n / np.prod(range(1, n + 1))
+        sr_sp_n = np.real(ifft(sr_sp_n)) / self._xsp_width
+        return sr_sp_n
+
     def _estimate_smooth(self, args):
         return self.A * self._bin_width * self._pdf_sr(args=args)
+
+    def estimate_smooth_n(self, args, n):
+        return self.A * self._bin_width * self._pdf_sr_n(args=args, n=n)
 
     def _estimate_count(self, args) -> tuple:
         """Estimate counts of every bin.
@@ -190,7 +213,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), mu)
+            (ser_args_1, ..., ser_args_(dof), occ)
 
         Return
         ------
@@ -224,7 +247,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), mu)
+            (ser_args_1, ..., ser_args_(dof), occ)
         """
         # make sure args are in range
         # otherwise an infinite "well"
@@ -270,7 +293,7 @@ class PMT_Fitter(metaclass=ABCMeta):
             Seed for random.
         track : int
             Take only every `track` steps from the chain.
-        step_length : dict[str, float]
+        step_length : ndarray[float]
             Step length to generate initial values.
 
         Notes
@@ -281,9 +304,7 @@ class PMT_Fitter(metaclass=ABCMeta):
             np.random.seed(seed)
 
         ndim = self.dof + 1
-        p0 = self.init + np.random.uniform(-1, 1, (nwalkers, ndim)) * list(
-            step_length.values()
-        )
+        p0 = self.init + np.random.uniform(-1, 1, (nwalkers, ndim)) * step_length
 
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, self.log_l, moves=emcee.moves.WalkMove()
@@ -318,6 +339,7 @@ class PMT_Fitter(metaclass=ABCMeta):
         print(f"Mean acceptance fraction: {np.mean(acceptance):.3f}")
         print(f"Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}")
         print("----------")
+        print("Init params: " + ", ".join([f"{e:.4g}" for e in self.init]))
         print(
             "SER params: "
             + ", ".join(
@@ -346,7 +368,7 @@ class MCP_Fitter(PMT_Fitter):
     A : ArrayLike
         total charge count
     occ_init : ArrayLike
-        initial mu
+        initial occupancy
     sample : int
         the number of sample intervals between bins
     cut : float or tuple[float]
@@ -500,16 +522,28 @@ class MCP_Fitter(PMT_Fitter):
     # property
     # --------
 
-    def Gms(self, args, A):
+    def Gms(self, args, occ):
         frac, mean, sigma = args[:3]
         k = (mean / sigma) ** 2
         theta = mean / k
-        return A * self._bin_width * self._pdf_gm(self.xsp, frac=frac, k=k, theta=theta)
-
-    def Tws(self, args, A):
-        frac, _, _, mu, p, phi = self._map_args(args)
+        mu_l = -np.log(1 - occ)
         return (
-            A * self._bin_width * self._pdf_tw(self.xsp, frac=frac, mu=mu, p=p, phi=phi)
+            self.A
+            * mu_l
+            * np.exp(-mu_l)
+            * self._bin_width
+            * self._pdf_gm(self.xsp, frac=frac, k=k, theta=theta)
+        )
+
+    def Tws(self, args, occ):
+        frac, _, _, mu, p, phi = self._map_args(args)
+        mu_l = -np.log(1 - occ)
+        return (
+            self.A
+            * mu_l
+            * np.exp(-mu_l)
+            * self._bin_width
+            * self._pdf_tw(self.xsp, frac=frac, mu=mu, p=p, phi=phi)
         )
 
     # -----------
@@ -568,12 +602,12 @@ class Dynode_Fitter(PMT_Fitter):
         sample=None,
         seterr: str = "warn",
         init=[
-            20,  # peak k/shape
-            40,  # peak theta/scale
+            600,  # peak mean
+            40,  # peak sigma
         ],
         bounds=[
-            (1, None),  # k > 1 to ensure peak
-            (0, None),  # theta > 0
+            (0, None),
+            (0, None),
         ],
     ):
         super().__init__(hist, bins, A, occ_init, sample, seterr, init, bounds)
@@ -604,7 +638,7 @@ class Dynode_Fitter(PMT_Fitter):
         Return mean of SPE distribution (Gm) by default.
         """
         if gain == "gp" or gain == "gm":
-            return args[0] * args[1]
+            return args[0]
         else:
             raise NameError(f"{gain} is not a illegal parameter!")
 
@@ -613,7 +647,130 @@ class Dynode_Fitter(PMT_Fitter):
     # -----------
 
     def _pdf(self, args):
-        return gamma.pdf(self.xsp, a=args[0], scale=args[1])
+        mean, sigma = args
+        k = (mean / sigma) ** 2
+        theta = mean / k
+        return gamma.pdf(self.xsp, a=k, scale=theta)
+
+
+class Dynode_Fitter_Opt(MCP_Fitter):
+    """A class to fit Dynode PMT charge spectrum.
+
+    Parameters
+    ----------
+    charge : ArrayLike
+        charge dataset input
+    A : ArrayLike
+        total charge count
+    occ_init : ArrayLike
+        initial occupancy
+    sample : int
+        the number of sample intervals between bins
+    cut : float or tuple[float]
+        the upper cut (lower cut optional), expressed with the ratio divided by main peak
+    init : ArrayLike
+        initial params of SER charge model, in the order of
+        "peak shape, peak rate"
+    bounds : ArrayLike
+        initial bounds of SER charge model, secondary within 3 sigma
+    seterr : {'ignore', 'warn', 'raise', 'call', 'print', 'log'}
+        see https://numpy.org/doc/stable/reference/generated/numpy.seterr.html
+    """
+
+    def __init__(
+        self,
+        hist,
+        bins,
+        A,
+        occ_init,
+        sample=None,
+        seterr: str = "warn",
+        init=[
+            0.9,  # normal applified ratio
+            600,  # peak mean
+            40,  # peak sigma
+            0.6,  # mis-applified mean ratio
+            0.6,  # mis-applified sigma ratio
+        ],
+        bounds=[
+            (0, 1),
+            (0, None),
+            (0, None),
+            (0, 1),
+            (0, 1),
+        ],
+    ):
+        super().__init__(hist, bins, A, occ_init, sample, seterr, init, bounds)
+
+    # ------------
+    # staticmethod
+    # ------------
+
+    def get_gain(self, args, gain: str = "gm"):
+        """Return gain of MCP.
+
+        Parameters
+        ----------
+        ser_args : ArrayLike.
+            Elements:
+                ratio : float
+                    mis-applified ratio
+                mean : float
+                    peak mean in Gamma distribution
+                sigma : float
+                    peak sigma in Gamma distribution
+                mean_t : float
+                    mis-applified mean
+                sigma_t : float
+                    mis-applified sigma
+
+        Return
+        ------
+        gain : float
+            Gain of dynode PMT.
+
+        Notes
+        -----
+        Return mean of SPE distribution (Gm) by default.
+        """
+        if gain == "gp":
+            return args[1]
+        elif gain == "gm":
+            return args[0] * args[1] * args[3] + (1 - args[0]) * args[1]
+        else:
+            raise NameError(f"{gain} is not a illegal parameter!")
+
+    def _zero(self, args):
+        return 1 - args[-1]
+
+    # -----------
+    # classmethod
+    # -----------
+
+    def _map_args(self, args) -> tuple:
+        """
+        Parameters
+        ----------
+        ser_args : ArrayLike.
+            Elements:
+                ratio : float
+                    normal applified ratio
+                mean : float
+                    peak mean in Gamma distribution
+                sigma : float
+                    peak sigma in Gamma distribution
+                mean_t : float
+                    mis-applified mean
+                sigma_t : float
+                    mis-applified sigma
+
+        Notes
+        -----
+        Insert lam=1 at the right position for MCP_Fitter.
+        """
+        args_with_lam = args.tolist()
+        args_with_lam.insert(3, 1.0)  # lam = 1
+        return super()._map_args(args_with_lam)
 
 
 class Mixture_Fitter(PMT_Fitter):
