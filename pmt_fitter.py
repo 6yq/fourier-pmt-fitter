@@ -341,6 +341,7 @@ class PMT_Fitter:
         print(f"Mean acceptance fraction: {np.mean(acceptance):.3f}")
         print(f"Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}")
         print("----------")
+        print("Init params: " + ", ".join([f"{e:.4g}" for e in self.init]))
         print(
             "SER params: "
             + ", ".join(
@@ -646,6 +647,126 @@ class Dynode_Fitter(PMT_Fitter):
         k = (mean / sigma) ** 2
         theta = mean / k
         return gamma.pdf(self.xsp, a=k, scale=theta)
+
+
+class Dynode_Fitter_Opt(MCP_Fitter):
+    """A class to fit Dynode PMT charge spectrum.
+
+    Parameters
+    ----------
+    charge : ArrayLike
+        charge dataset input
+    A : ArrayLike
+        total charge count
+    occ_init : ArrayLike
+        initial occupancy
+    sample : int
+        the number of sample intervals between bins
+    cut : float or tuple[float]
+        the upper cut (lower cut optional), expressed with the ratio divided by main peak
+    init : ArrayLike
+        initial params of SER charge model, in the order of
+        "peak shape, peak rate"
+    bounds : ArrayLike
+        initial bounds of SER charge model, secondary within 3 sigma
+    seterr : {'ignore', 'warn', 'raise', 'call', 'print', 'log'}
+        see https://numpy.org/doc/stable/reference/generated/numpy.seterr.html
+    """
+
+    def __init__(
+        self,
+        hist,
+        bins,
+        A,
+        occ_init,
+        sample=None,
+        seterr: str = "warn",
+        init=[
+            0.9,  # normal applified ratio
+            600,  # peak mean
+            40,  # peak sigma
+            0.6,  # mis-applified mean ratio
+            0.6,  # mis-applified sigma ratio
+        ],
+        bounds=[
+            (0, 1),
+            (0, None),
+            (0, None),
+            (0, 1),
+            (0, 1),
+        ],
+    ):
+        super().__init__(hist, bins, A, occ_init, sample, seterr, init, bounds)
+
+    # ------------
+    # staticmethod
+    # ------------
+
+    def get_gain(self, args, gain: str = "gm"):
+        """Return gain of MCP.
+
+        Parameters
+        ----------
+        ser_args : ArrayLike.
+            Elements:
+                ratio : float
+                    mis-applified ratio
+                mean : float
+                    peak mean in Gamma distribution
+                sigma : float
+                    peak sigma in Gamma distribution
+                mean_t : float
+                    mis-applified mean
+                sigma_t : float
+                    mis-applified sigma
+
+        Return
+        ------
+        gain : float
+            Gain of dynode PMT.
+
+        Notes
+        -----
+        Return mean of SPE distribution (Gm) by default.
+        """
+        if gain == "gp":
+            return args[1]
+        elif gain == "gm":
+            return args[0] * args[1] * args[3] + (1 - args[0]) * args[1]
+        else:
+            raise NameError(f"{gain} is not a illegal parameter!")
+
+    def _zero(self, args):
+        return 1 - args[-1]
+
+    # -----------
+    # classmethod
+    # -----------
+
+    def _map_args(self, args) -> tuple:
+        """
+        Parameters
+        ----------
+        ser_args : ArrayLike.
+            Elements:
+                ratio : float
+                    normal applified ratio
+                mean : float
+                    peak mean in Gamma distribution
+                sigma : float
+                    peak sigma in Gamma distribution
+                mean_t : float
+                    mis-applified mean
+                sigma_t : float
+                    mis-applified sigma
+
+        Notes
+        -----
+        Insert lam=1 at the right position for MCP_Fitter.
+        """
+        args_with_lam = args.tolist()
+        args_with_lam.insert(3, 1.0)  # lam = 1
+        return super()._map_args(args_with_lam)
 
 
 class Mixture_Fitter(PMT_Fitter):
