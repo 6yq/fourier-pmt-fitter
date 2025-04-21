@@ -327,10 +327,10 @@ class PMT_Fitter:
         args_complete = np.append(self.ser_args, self.occ)
 
         self.gps = np.apply_along_axis(
-            self.get_gain, axis=1, arr=self.samples_track, gain="gp"
+            self.get_gain, axis=1, arr=self.samples_track[:, : self.dof], gain="gp"
         )
         self.gms = np.apply_along_axis(
-            self.get_gain, axis=1, arr=self.samples_track, gain="gm"
+            self.get_gain, axis=1, arr=self.samples_track[:, : self.dof], gain="gm"
         )
 
         print("----------")
@@ -446,10 +446,16 @@ class MCP_Fitter(PMT_Fitter):
         -----
         Return mean of SPE distribution (Gm) by default.
         """
+        print(args, gain)
         if gain == "gp":
-            return args[1]
+            _, mean, sigma, _, _, _ = args
+            k = (mean / sigma) ** 2
+            theta = mean / k
+            return (k - 1) * theta
         elif gain == "gm":
-            return args[0] * args[1] + (1 - args[0]) * args[1] * args[3] * args[4]
+            frac, mean, sigma, lam, mean_t, sigma_t = args
+            fracReNormal = frac / (1 - (1 - frac) * np.exp(-lam))
+            return fracReNormal * mean + (1 - fracReNormal) * mean * mean_t
         else:
             raise NameError(f"{gain} is not a illegal parameter!")
 
@@ -637,8 +643,12 @@ class Dynode_Fitter(PMT_Fitter):
         -----
         Return mean of SPE distribution (Gm) by default.
         """
+        print(args, gain)
         if gain == "gp" or gain == "gm":
-            return args[0]
+            mean, sigma = args
+            k = (mean / sigma) ** 2
+            theta = mean / k
+            return (k - 1) * theta
         else:
             raise NameError(f"{gain} is not a illegal parameter!")
 
