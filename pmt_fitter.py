@@ -322,9 +322,12 @@ class PMT_Fitter:
         ]  # (step, ndim)
         self.ser_args = np.mean(self.samples_track[:, : self.dof], axis=0)
         self.ser_args_std = np.std(self.samples_track[:, : self.dof], axis=0)
-        self.occ = np.mean(self.samples_track[:, -1], axis=0)
-        self.occ_std = np.std(self.samples_track[:, -1], axis=0)
         args_complete = np.append(self.ser_args, self.occ)
+
+        # _zero() is a fix of real zero count
+        occReg = 1 - np.apply_along_axis(self._zero, axis=1, arr=self.samples_track)
+        self.occ = np.mean(occReg, axis=0)
+        self.occ_std = np.std(occReg, axis=0)
 
         self.gps = np.apply_along_axis(
             self.get_gain, axis=1, arr=self.samples_track[:, : self.dof], gain="gp"
@@ -446,7 +449,6 @@ class MCP_Fitter(PMT_Fitter):
         -----
         Return mean of SPE distribution (Gm) by default.
         """
-        print(args, gain)
         if gain == "gp":
             _, mean, sigma, _, _, _ = args
             k = (mean / sigma) ** 2
@@ -643,7 +645,6 @@ class Dynode_Fitter(PMT_Fitter):
         -----
         Return mean of SPE distribution (Gm) by default.
         """
-        print(args, gain)
         if gain == "gp" or gain == "gm":
             mean, sigma = args
             k = (mean / sigma) ** 2
