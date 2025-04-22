@@ -458,7 +458,7 @@ class MCP_Fitter(PMT_Fitter):
         elif gain == "gm":
             frac, mean, sigma, lam, mean_t, sigma_t = args
             fracReNormal = frac / (1 - (1 - frac) * np.exp(-lam))
-            return fracReNormal * mean + (1 - fracReNormal) * mean * mean_t
+            return fracReNormal * mean + (1 - fracReNormal) * mean * mean_t * lam
         else:
             raise NameError(f"{gain} is not a illegal parameter!")
 
