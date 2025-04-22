@@ -322,7 +322,8 @@ class PMT_Fitter:
         ]  # (step, ndim)
         self.ser_args = np.mean(self.samples_track[:, : self.dof], axis=0)
         self.ser_args_std = np.std(self.samples_track[:, : self.dof], axis=0)
-        args_complete = np.append(self.ser_args, self.occ)
+        occ = np.mean(self.samples_track[:, -1], axis=0)
+        args_complete = np.append(self.ser_args, occ)
 
         # _zero() is a fix of real zero count
         occReg = 1 - np.apply_along_axis(self._zero, axis=1, arr=self.samples_track)
