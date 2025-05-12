@@ -1,10 +1,9 @@
-import time
 import emcee
 import numpy as np
 
 from scipy.stats import gamma
 from scipy.fft import fft, ifft
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, peak_widths
 from tweedie_pdf import tweedie_reckon
 
 
@@ -13,38 +12,85 @@ class PMT_Fitter:
         self,
         hist,
         bins,
-        A,
+        A=None,
         occ_init=None,
         sample=None,
         seterr: str = "warn",
         init=None,
         bounds=None,
+        auto_init=False,
     ):
         np.seterr(all=seterr)
 
-        self.A = A
+        self._isWholeSpectrum = self.A is None
+        self.A = sum(hist) if self._isWholeSpectrum else A
+        self._init = init if isinstance(init, np.ndarray) else np.array(init)
         self.bounds = (
             bounds.tolist() if isinstance(bounds, np.ndarray) else list(bounds)
         )
-        self._init = init if isinstance(init, np.ndarray) else np.array(init)
-        self._occ_init = sum(hist) / A if occ_init is None else occ_init
+
+        if occ_init:  # given initial value
+            self._occ_init = occ_init
+        elif self._isWholeSpectrum:  # whole spectrum
+            self._occ_init = 0.1
+        else:
+            self._occ_init = sum(hist) / self.A
+
         # some magic regression for optimal distortion
         self.sample = (
             16 * int(1 / (1 - self._occ_init) ** 0.673313) if sample is None else sample
         )
 
-        self.init = np.append(self._init, self._occ_init)
-        self.bounds.append((0, 1))
-        self.bounds = tuple(self.bounds)
-
         self.hist = hist if isinstance(hist, np.ndarray) else np.array(hist)
         self.bins = bins if isinstance(bins, np.ndarray) else np.array(bins)
         self.zero = A - sum(self.hist)
+
+        if auto_init:
+            if self._isWholeSpectrum:
+                # pedestal
+                ped_gp, ped_sigma = self.compute_init(self.hist, self.bins, peak_idx=0)
+                # main SPE peak
+                spe_gp, spe_sigma = self.compute_init(self.hist, self.bins, peak_idx=1)
+
+                self._replace_spe_params(spe_gp, spe_sigma)
+                self._replace_spe_bounds(spe_gp, spe_sigma)
+
+                self.init = np.array([ped_gp, ped_sigma, *self._init, self._occ_init])
+
+                ped_percentile = 0.1
+                self.bounds.insert(
+                    0, (ped_gp * (1 - ped_percentile), ped_gp * (1 + ped_percentile))
+                )
+                self.bounds.insert(
+                    1,
+                    (
+                        ped_sigma * (1 - ped_percentile),
+                        ped_sigma * (1 + ped_percentile),
+                    ),
+                )
+            else:
+                spe_gp, spe_sigma = self.compute_init(self.hist, self.bins, peak_idx=0)
+
+                self._replace_spe_params(spe_gp, spe_sigma)
+                self._replace_spe_bounds(spe_gp, spe_sigma)
+
+                self.init = np.append(self._init, self._occ_init)
+        else:
+            # add occupancy
+            self.init = np.append(self._init, self._occ_init)
+
+        # add occupancy
+        self.bounds.append((0, 1))
+        self.bounds = tuple(bounds)
+
         # there is no need to check these variables outside the class
         self._bin_width = self.bins[1] - self.bins[0]
         self._xs = (self.bins[:-1] + self.bins[1:]) / 2
         self._interval = (self.bins[1] - self.bins[0]) / self.sample
-        self._bwds = 1 - int(-self.bins[0] // self._interval)
+        # to cover the whole domain to perform loseless FFT
+        self._bwds = (
+            1 - int(-self.bins[0] // self._interval) if not self._isWholeSpectrum else 0
+        )
         self.xsp = np.linspace(
             self.bins[0] - self._bwds * self._interval,
             self.bins[-1],
@@ -53,9 +99,9 @@ class PMT_Fitter:
         )
         self._xsp_width = self.xsp[1] - self.xsp[0]
 
+        # 2 parameters for pedestal
         self.dof = len(init)
         self.C = self._log_l_C()
-        self._start = time.time()
 
     # ------------
     # staticmethod
@@ -98,6 +144,29 @@ class PMT_Fitter:
         return flag
 
     def merge_bins(self, hist, y, threshold=5):
+        """
+        Merge bins with low counts.
+
+        Parameters
+        ----------
+        hist : ArrayLike
+            Histogram of counts.
+        y : ArrayLike
+            Counts.
+        threshold : int
+            Threshold of counts to merge.
+
+        Return
+        ------
+        hist_ : ArrayLike
+            Merged histogram.
+        y_ : ArrayLike
+            Merged counts.
+
+        Notes
+        -----
+        Merge the bins below 5 from both sides to the middle.
+        """
         hist_ = hist.copy()
         y_ = y.copy()
 
@@ -132,6 +201,53 @@ class PMT_Fitter:
 
         return hist_, y_
 
+    def compute_init(self, hist, edges, peak_idx=0, prominence=5):
+        """
+        Compute initial values (mean, std) for a given peak in a histogram.
+
+        Parameters:
+            hist : ndarray
+                Histogram counts.
+            edges : ndarray
+                Bin edges (length = len(hist) + 1).
+            peak_idx : int
+                Which peak to extract (0 = first prominent, 1 = second, ...).
+            prominence : float
+                Minimum prominence required to be considered a peak.
+
+        Returns:
+            gp_init : float
+                Estimated peak position (Gaussian mean).
+            sigma_init : float
+                Estimated standard deviation.
+        """
+        edges = np.array(edges)
+        bin_centers = (edges[:-1] + edges[1:]) / 2
+
+        # Find prominent peaks
+        peaks, props = find_peaks(hist, prominence=prominence)
+        if len(peaks) <= peak_idx:
+            raise ValueError(
+                f"Only found {len(peaks)} peaks with prominence ≥ {prominence}"
+            )
+
+        peak = peaks[peak_idx : peak_idx + 1]
+        _, _, left_ips, right_ips = peak_widths(hist, peak, rel_height=0.5)
+
+        # Interpolate position
+        def interpolate(idx):
+            base = np.floor(idx).astype(int)
+            frac = idx - base
+            return bin_centers[base] + frac * (bin_centers[1] - bin_centers[0])
+
+        gp_init = interpolate(peak)[0]
+        x_left = interpolate(left_ips)[0]
+        x_right = interpolate(right_ips)[0]
+        fwhm = x_right - x_left
+        sigma_init = fwhm / (2 * np.sqrt(2 * np.log(2)))
+
+        return gp_init, sigma_init
+
     # --------
     # property
     # --------
@@ -154,9 +270,6 @@ class PMT_Fitter:
     # classmethod
     # -----------
 
-    def _pdf(self, args):
-        pass
-
     def _zero(self, args):
         return 1 - args[-1]
 
@@ -164,7 +277,24 @@ class PMT_Fitter:
         return 0
 
     def get_gain(self, args):
-        pass
+        raise NotImplementedError
+
+    def _replace_spe_params(self, gp_init, sigma_init):
+        """
+        Replace SPE-related parameters in self._init.
+        Override this in subclasses to specify exact replacement logic.
+        """
+        raise NotImplementedError
+
+    def _replace_spe_bounds(self, gp_bound, sigma_bound):
+        """
+        Replace SPE-related parameters in self.bounds.
+        Override this in subclasses to specify exact replacement logic.
+        """
+        raise NotImplementedError
+
+    def _pdf(self, args):
+        raise NotImplementedError
 
     def _pdf_sr(self, args):
         """Applying DFT & IDFT to estimate pdf.
