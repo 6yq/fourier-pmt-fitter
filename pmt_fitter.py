@@ -28,7 +28,7 @@ class PMT_Fitter:
         )
         self._init = init if isinstance(init, np.ndarray) else np.array(init)
         self._occ_init = sum(hist) / A if occ_init is None else occ_init
-        # see https://gitlab.airelinux.org/juno/OSIRIS/production/-/issues/48#note_42922
+        # some magic regression for optimal distortion
         self.sample = (
             16 * int(1 / (1 - self._occ_init) ** 0.673313) if sample is None else sample
         )
