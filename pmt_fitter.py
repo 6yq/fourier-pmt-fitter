@@ -103,9 +103,9 @@ class PMT_Fitter:
         self.dof = len(init)
         self.C = self._log_l_C()
 
-    # ------------
-    # staticmethod
-    # ------------
+    # -----------
+    # helpingfunc
+    # -----------
 
     def composite_simpson(self, pdf_slice, interval, sample):
         """Use composite Simpson to integrate pdf.
@@ -266,9 +266,9 @@ class PMT_Fitter:
         )
         return N_part + n_part
 
-    # -----------
-    # classmethod
-    # -----------
+    # ---------
+    # implement
+    # ---------
 
     def _zero(self, args):
         return 1 - args[-1]
@@ -521,7 +521,7 @@ class MCP_Fitter(PMT_Fitter):
         self,
         hist,
         bins,
-        A,
+        A=None,
         occ_init=None,
         sample=None,
         seterr: str = "warn",
@@ -541,56 +541,18 @@ class MCP_Fitter(PMT_Fitter):
             (0.3, 0.7),  # mean / Q1 based on Jun's work
             (0.05, 0.3),  # std variance / Q1 based on Jun's work
         ],
+        auto_init=False,
     ):
-        super().__init__(hist, bins, A, occ_init, sample, seterr, init, bounds)
+        super().__init__(
+            hist, bins, A, occ_init, sample, seterr, init, bounds, auto_init
+        )
 
-    # ------------
-    # staticmethod
-    # ------------
+    # -----------
+    # helpingfunc
+    # -----------
 
     def const(self, args):
         return (1 - args[0]) * np.exp(-args[3])
-
-    def get_gain(self, args, gain: str = "gm"):
-        """Return gain of MCP.
-
-        Parameters
-        ----------
-        ser_args : ArrayLike.
-            Elements:
-                frac : float
-                    ratio of peak
-                mean : float
-                    main peak, mean in Gamma distribution
-                sigma : float
-                    main peak, sigma in Gamma distribution
-                lam : float
-                    mean of secondary electron numbers
-                mean_t : float
-                    calibrated on 8-inches, the mean of secondary Gamma gain / Q1
-                sigma_t : float
-                    calibrated on 8-inches, the std variance of secondary Gamma gain / Q1
-
-        Return
-        ------
-        gain : float
-            Gain of MCP.
-
-        Notes
-        -----
-        Return mean of SPE distribution (Gm) by default.
-        """
-        if gain == "gp":
-            _, mean, sigma, _, _, _ = args
-            k = (mean / sigma) ** 2
-            theta = mean / k
-            return (k - 1) * theta
-        elif gain == "gm":
-            frac, mean, sigma, lam, mean_t, sigma_t = args
-            fracReNormal = frac / (1 - (1 - frac) * np.exp(-lam))
-            return fracReNormal * mean + (1 - fracReNormal) * mean * mean_t * lam
-        else:
-            raise NameError(f"{gain} is not a illegal parameter!")
 
     def _map_args(self, args) -> tuple:
         """Map MCP-PMT SER/SPE charge model parameters.
@@ -685,9 +647,50 @@ class MCP_Fitter(PMT_Fitter):
             * self._pdf_tw(self.xsp, frac=frac, mu=mu, p=p, phi=phi)
         )
 
-    # -----------
-    # classmethod
-    # -----------
+    # ---------
+    # implement
+    # ---------
+
+    def get_gain(self, args, gain: str = "gm"):
+        """Return gain of MCP.
+
+        Parameters
+        ----------
+        ser_args : ArrayLike.
+            Elements:
+                frac : float
+                    ratio of peak
+                mean : float
+                    main peak, mean in Gamma distribution
+                sigma : float
+                    main peak, sigma in Gamma distribution
+                lam : float
+                    mean of secondary electron numbers
+                mean_t : float
+                    calibrated on 8-inches, the mean of secondary Gamma gain / Q1
+                sigma_t : float
+                    calibrated on 8-inches, the std variance of secondary Gamma gain / Q1
+
+        Return
+        ------
+        gain : float
+            Gain of MCP.
+
+        Notes
+        -----
+        Return mean of SPE distribution (Gm) by default.
+        """
+        if gain == "gp":
+            _, mean, sigma, _, _, _ = args
+            k = (mean / sigma) ** 2
+            theta = mean / k
+            return (k - 1) * theta
+        elif gain == "gm":
+            frac, mean, sigma, lam, mean_t, sigma_t = args
+            fracReNormal = frac / (1 - (1 - frac) * np.exp(-lam))
+            return fracReNormal * mean + (1 - fracReNormal) * mean * mean_t * lam
+        else:
+            raise NameError(f"{gain} is not a illegal parameter!")
 
     def _pdf(self, args):
         frac, k, theta, mu, p, phi = self._map_args(args)
@@ -706,6 +709,17 @@ class MCP_Fitter(PMT_Fitter):
         frac, _, _, lam, _, _ = args[: self.dof]
         mu = -np.log(1 - args[self.dof])
         return np.exp(mu * ((1 - frac) * np.exp(-lam) - 1))
+
+    def replace_spe_params(self, gp_init, sigma_init):
+        self._init[1] = gp_init
+        # secondaries broaden the peak
+        self._init[2] = 0.8 * sigma_init
+
+    def replace_spe_bounds(self, gp_bound, sigma_bound):
+        gp_bound_ = (0.5 * gp_bound, 1.5 * gp_bound)
+        sigma_bound_ = (0.05 * sigma_bound, 5 * sigma_bound)
+        self.bounds[1] = gp_bound_
+        self.bounds[2] = sigma_bound_
 
 
 class Dynode_Fitter(PMT_Fitter):
@@ -736,8 +750,8 @@ class Dynode_Fitter(PMT_Fitter):
         self,
         hist,
         bins,
-        A,
-        occ_init,
+        A=None,
+        occ_init=None,
         sample=None,
         seterr: str = "warn",
         init=[
@@ -748,12 +762,15 @@ class Dynode_Fitter(PMT_Fitter):
             (0, None),
             (0, None),
         ],
+        auto_init=False,
     ):
-        super().__init__(hist, bins, A, occ_init, sample, seterr, init, bounds)
+        super().__init__(
+            hist, bins, A, occ_init, sample, seterr, init, bounds, auto_init
+        )
 
-    # ------------
-    # staticmethod
-    # ------------
+    # ---------
+    # implement
+    # ---------
 
     def get_gain(self, args, gain: str = "gm"):
         """Return gain of MCP.
@@ -784,139 +801,25 @@ class Dynode_Fitter(PMT_Fitter):
         else:
             raise NameError(f"{gain} is not a illegal parameter!")
 
-    # -----------
-    # classmethod
-    # -----------
-
     def _pdf(self, args):
         mean, sigma = args
         k = (mean / sigma) ** 2
         theta = mean / k
         return gamma.pdf(self.xsp, a=k, scale=theta)
 
+    def replace_spe_params(self, gp_init, sigma_init):
+        self._init[0] = gp_init
+        self._init[1] = sigma_init
 
-class Dynode_Fitter_Opt(MCP_Fitter):
-    """A class to fit Dynode PMT charge spectrum.
-
-    Parameters
-    ----------
-    charge : ArrayLike
-        charge dataset input
-    A : ArrayLike
-        total charge count
-    occ_init : ArrayLike
-        initial occupancy
-    sample : int
-        the number of sample intervals between bins
-    cut : float or tuple[float]
-        the upper cut (lower cut optional), expressed with the ratio divided by main peak
-    init : ArrayLike
-        initial params of SER charge model, in the order of
-        "peak shape, peak rate"
-    bounds : ArrayLike
-        initial bounds of SER charge model, secondary within 3 sigma
-    seterr : {'ignore', 'warn', 'raise', 'call', 'print', 'log'}
-        see https://numpy.org/doc/stable/reference/generated/numpy.seterr.html
-    """
-
-    def __init__(
-        self,
-        hist,
-        bins,
-        A,
-        occ_init,
-        sample=None,
-        seterr: str = "warn",
-        init=[
-            0.9,  # normal applified ratio
-            600,  # peak mean
-            40,  # peak sigma
-            0.6,  # mis-applified mean ratio
-            0.6,  # mis-applified sigma ratio
-        ],
-        bounds=[
-            (0, 1),
-            (0, None),
-            (0, None),
-            (0, 1),
-            (0, 1),
-        ],
-    ):
-        super().__init__(hist, bins, A, occ_init, sample, seterr, init, bounds)
-
-    # ------------
-    # staticmethod
-    # ------------
-
-    def get_gain(self, args, gain: str = "gm"):
-        """Return gain of MCP.
-
-        Parameters
-        ----------
-        ser_args : ArrayLike.
-            Elements:
-                ratio : float
-                    mis-applified ratio
-                mean : float
-                    peak mean in Gamma distribution
-                sigma : float
-                    peak sigma in Gamma distribution
-                mean_t : float
-                    mis-applified mean
-                sigma_t : float
-                    mis-applified sigma
-
-        Return
-        ------
-        gain : float
-            Gain of dynode PMT.
-
-        Notes
-        -----
-        Return mean of SPE distribution (Gm) by default.
-        """
-        if gain == "gp":
-            return args[1]
-        elif gain == "gm":
-            return args[0] * args[1] * args[3] + (1 - args[0]) * args[1]
-        else:
-            raise NameError(f"{gain} is not a illegal parameter!")
-
-    def _zero(self, args):
-        return 1 - args[-1]
-
-    # -----------
-    # classmethod
-    # -----------
-
-    def _map_args(self, args) -> tuple:
-        """
-        Parameters
-        ----------
-        ser_args : ArrayLike.
-            Elements:
-                ratio : float
-                    normal applified ratio
-                mean : float
-                    peak mean in Gamma distribution
-                sigma : float
-                    peak sigma in Gamma distribution
-                mean_t : float
-                    mis-applified mean
-                sigma_t : float
-                    mis-applified sigma
-
-        Notes
-        -----
-        Insert lam=1 at the right position for MCP_Fitter.
-        """
-        args_with_lam = args.tolist()
-        args_with_lam.insert(3, 1.0)  # lam = 1
-        return super()._map_args(args_with_lam)
+    def replace_spe_bounds(self, gp_bound, sigma_bound):
+        gp_bound_ = (0.5 * gp_bound, 1.5 * gp_bound)
+        sigma_bound_ = (0.5 * sigma_bound, 1.5 * sigma_bound)
+        self.bounds[0] = gp_bound_
+        self.bounds[1] = sigma_bound_
 
 
 class Mixture_Fitter(PMT_Fitter):
-    """A class to fit Dynode PMT charge spectrum.
+    """A class to fit PMT charge spectrum.
 
     Parameters
     ----------
@@ -943,10 +846,9 @@ class Mixture_Fitter(PMT_Fitter):
         self,
         hist,
         bins,
-        A,
-        occ_init,
+        A=None,
+        occ_init=None,
         sample=None,
-        cut: float | tuple[float] = (0.2, 5),
         seterr: str = "warn",
         init=[
             5e-04,
@@ -958,12 +860,43 @@ class Mixture_Fitter(PMT_Fitter):
             (600, 1200),
             (0, 400),
         ],
+        auto_init=False,
     ):
-        super().__init__(hist, bins, A, occ_init, sample, cut, seterr, init, bounds)
+        super().__init__(
+            hist, bins, A, occ_init, sample, seterr, init, bounds, auto_init
+        )
 
-    # ------------
-    # staticmethod
-    # ------------
+    # --------
+    # property
+    # --------
+
+    def exps(self, args, occ):
+        p, G, sigma = args
+        mu_l = -np.log(1 - occ)
+        return (
+            self.A
+            * self._bin_width
+            * p
+            * expon.pdf(self.xsp / G, loc=0.1, scale=2.2)
+            * self._xsp_width
+        )
+
+    def norms(self, args, occ):
+        p, G, sigma = args
+        mu_l = -np.log(1 - occ)
+        return (
+            self.A
+            * mu_l
+            * np.exp(-mu_l)
+            * self._bin_width
+            * (1 - p)
+            * norm.pdf(self.xsp, loc=G, scale=sigma)
+            * self._xsp_width
+        )
+
+    # ---------
+    # implement
+    # ---------
 
     def get_gain(self, args, gain: str = "gm"):
         """Return gain of MCP.
@@ -995,32 +928,8 @@ class Mixture_Fitter(PMT_Fitter):
         else:
             raise NameError(f"{gain} is not a illegal parameter!")
 
-    # -----------
-    # classmethod
-    # -----------
-
     def _pdf(self, args):
         p, G, sigma = args
         return p * expon.pdf(self.xsp / G, loc=0.1, scale=2.2) + (1 - p) * norm.pdf(
             self.xsp, loc=G, scale=sigma
-        )
-
-    def exps(self, args, A):
-        p, G, sigma = args
-        return (
-            A
-            * self._bin_width
-            * p
-            * expon.pdf(self.xsp / G, loc=0.1, scale=2.2)
-            * self._xsp_width
-        )
-
-    def norms(self, args, A):
-        p, G, sigma = args
-        return (
-            A
-            * self._bin_width
-            * (1 - p)
-            * norm.pdf(self.xsp, loc=G, scale=sigma)
-            * self._xsp_width
         )
