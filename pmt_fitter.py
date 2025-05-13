@@ -49,23 +49,25 @@ class PMT_Fitter:
             if self._isWholeSpectrum:
                 # pedestal
                 ped_gp, ped_sigma = self.compute_init(self.hist, self.bins, peak_idx=0)
+                print(f"ped: {ped_gp} $\pm$ {ped_sigma}")
                 # main SPE peak
                 spe_gp, spe_sigma = self.compute_init(self.hist, self.bins, peak_idx=1)
+                print(f"spe: {spe_gp} $\pm$ {spe_sigma}")
 
                 self._replace_spe_params(spe_gp, spe_sigma)
                 self._replace_spe_bounds(spe_gp, spe_sigma)
 
                 self.init = np.array([ped_gp, ped_sigma, *self._init, self._occ_init])
 
-                ped_percentile = 0.1
-                self.bounds.insert(
-                    0, (ped_gp * (1 - ped_percentile), ped_gp * (1 + ped_percentile))
-                )
+                # fluctuation in position and width (near 0, percentile not ideal)
+                ped_peak_fluc = 5
+                ped_sigma_percentile = 0.2
+                self.bounds.insert(0, (ped_gp - ped_peak_fluc, ped_gp + ped_peak_fluc))
                 self.bounds.insert(
                     1,
                     (
-                        ped_sigma * (1 - ped_percentile),
-                        ped_sigma * (1 + ped_percentile),
+                        ped_sigma * (1 - ped_sigma_percentile),
+                        ped_sigma * (1 + ped_sigma_percentile),
                     ),
                 )
             else:
@@ -81,7 +83,7 @@ class PMT_Fitter:
 
         # add occupancy
         self.bounds.append((0, 1))
-        self.bounds = tuple(bounds)
+        self.bounds = tuple(self.bounds)
 
         # there is no need to check these variables outside the class
         self._bin_width = self.bins[1] - self.bins[0]
@@ -201,7 +203,9 @@ class PMT_Fitter:
 
         return hist_, y_
 
-    def compute_init(self, hist, edges, peak_idx=0, prominence=5):
+    def compute_init(
+        self, hist, edges, peak_idx=0, distance=10, width=5, threshold=5, prominence=20
+    ):
         """
         Compute initial values (mean, std) for a given peak in a histogram.
 
@@ -212,6 +216,12 @@ class PMT_Fitter:
                 Bin edges (length = len(hist) + 1).
             peak_idx : int
                 Which peak to extract (0 = first prominent, 1 = second, ...).
+            distance : float
+                Minimum distance from the peak to be considered a peak.
+            width : float
+                Minimum width required to be considered a peak.
+            threshold : float
+                Minimum threshold required to be considered a peak.
             prominence : float
                 Minimum prominence required to be considered a peak.
 
@@ -225,7 +235,9 @@ class PMT_Fitter:
         bin_centers = (edges[:-1] + edges[1:]) / 2
 
         # Find prominent peaks
-        peaks, props = find_peaks(hist, prominence=prominence)
+        peaks, props = find_peaks(
+            hist, width=width, threshold=threshold, prominence=prominence
+        )
         if len(peaks) <= peak_idx:
             raise ValueError(
                 f"Only found {len(peaks)} peaks with prominence ≥ {prominence}"
@@ -537,7 +549,7 @@ class MCP_Fitter(PMT_Fitter):
             (0.35, 1),
             (0, None),  # mean
             (0, None),  # sigma
-            (3, 7),  # secondary
+            (1, 7),  # secondary
             (0.3, 0.7),  # mean / Q1 based on Jun's work
             (0.05, 0.3),  # std variance / Q1 based on Jun's work
         ],
