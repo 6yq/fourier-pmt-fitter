@@ -22,7 +22,7 @@ class PMT_Fitter:
     ):
         np.seterr(all=seterr)
 
-        self._isWholeSpectrum = self.A is None
+        self._isWholeSpectrum = A is None
         self.A = sum(hist) if self._isWholeSpectrum else A
         self._init = init if isinstance(init, np.ndarray) else np.array(init)
         self.bounds = (
@@ -43,7 +43,7 @@ class PMT_Fitter:
 
         self.hist = hist if isinstance(hist, np.ndarray) else np.array(hist)
         self.bins = bins if isinstance(bins, np.ndarray) else np.array(bins)
-        self.zero = A - sum(self.hist)
+        self.zero = self.A - sum(self.hist)
 
         if auto_init:
             if self._isWholeSpectrum:
@@ -710,12 +710,12 @@ class MCP_Fitter(PMT_Fitter):
         mu = -np.log(1 - args[self.dof])
         return np.exp(mu * ((1 - frac) * np.exp(-lam) - 1))
 
-    def replace_spe_params(self, gp_init, sigma_init):
+    def _replace_spe_params(self, gp_init, sigma_init):
         self._init[1] = gp_init
         # secondaries broaden the peak
         self._init[2] = 0.8 * sigma_init
 
-    def replace_spe_bounds(self, gp_bound, sigma_bound):
+    def _replace_spe_bounds(self, gp_bound, sigma_bound):
         gp_bound_ = (0.5 * gp_bound, 1.5 * gp_bound)
         sigma_bound_ = (0.05 * sigma_bound, 5 * sigma_bound)
         self.bounds[1] = gp_bound_
@@ -807,11 +807,11 @@ class Dynode_Fitter(PMT_Fitter):
         theta = mean / k
         return gamma.pdf(self.xsp, a=k, scale=theta)
 
-    def replace_spe_params(self, gp_init, sigma_init):
+    def _replace_spe_params(self, gp_init, sigma_init):
         self._init[0] = gp_init
         self._init[1] = sigma_init
 
-    def replace_spe_bounds(self, gp_bound, sigma_bound):
+    def _replace_spe_bounds(self, gp_bound, sigma_bound):
         gp_bound_ = (0.5 * gp_bound, 1.5 * gp_bound)
         sigma_bound_ = (0.5 * sigma_bound, 1.5 * sigma_bound)
         self.bounds[0] = gp_bound_
