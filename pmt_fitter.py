@@ -305,6 +305,9 @@ class PMT_Fitter:
     def _pdf(self, args):
         raise NotImplementedError
 
+    def _pdf_ped(self, args):
+        return norm.pdf(self.xsp, loc=args[0], scale=args[1])
+
     def _pdf_sr(self, args):
         """Applying DFT & IDFT to estimate pdf.
 
@@ -318,7 +321,7 @@ class PMT_Fitter:
         ser_args = args[start_idx:-1]
 
         if self._isWholeSpectrum:
-            ped_pdf = norm.pdf(self.xsp, loc=args[0], scale=args[1])
+            ped_pdf = self._pdf_ped(args[:start_idx])
             ped_pdf_r = fft(ped_pdf) * self._xsp_width
 
         pdf = self._pdf(ser_args)
@@ -354,10 +357,13 @@ class PMT_Fitter:
         if not np.all(np.isfinite(pdf)):
             raise ValueError("Non-finite value in PDF.")
 
-        s_sp = fft(pdf) * self._xsp_width + self.const(ser_args)
-        mu = -np.log(1 - args[-1])
-        sr_sp_n = np.exp(-mu) * (mu * s_sp) ** n / np.prod(range(1, n + 1))
-        sr_sp_n = np.real(ifft(sr_sp_n)) / self._xsp_width
+        if n != 0:
+            s_sp = fft(pdf) * self._xsp_width + self.const(ser_args)
+            mu = -np.log(1 - args[-1])
+            sr_sp_n = np.exp(-mu) * (mu * s_sp) ** n / np.prod(range(1, n + 1))
+            sr_sp_n = np.real(ifft(sr_sp_n)) / self._xsp_width
+        elif self._isWholeSpectrum:
+            return self._pdf_ped(args[:start_idx])
         return sr_sp_n
 
     def _estimate_smooth(self, args):
@@ -526,6 +532,9 @@ class PMT_Fitter:
         print(f"Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}")
         print("----------")
         print("Init params: " + ", ".join([f"{e:.4g}" for e in self.init]))
+        print(
+            "Pedetal params: " + f"{self.ped_args[0]:.4g} pm {self.ped_args_std[0]:.4g}"
+        )
         print(
             "SER params: "
             + ", ".join(
