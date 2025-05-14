@@ -1,10 +1,11 @@
 import emcee
 import numpy as np
 
-from scipy.stats import gamma
 from scipy.fft import fft, ifft
+from scipy.stats import gamma, norm
 from scipy.signal import find_peaks, peak_widths
 from tweedie_pdf import tweedie_reckon
+from tweedie import tweedie
 
 
 class PMT_Fitter:
@@ -43,7 +44,10 @@ class PMT_Fitter:
 
         self.hist = hist if isinstance(hist, np.ndarray) else np.array(hist)
         self.bins = bins if isinstance(bins, np.ndarray) else np.array(bins)
+
         self.zero = self.A - sum(self.hist)
+        if self._isWholeSpectrum:
+            assert self.zero == 0, "[ERROR] have a zero bug, please post an issue :)"
 
         if auto_init:
             if self._isWholeSpectrum:
@@ -101,8 +105,8 @@ class PMT_Fitter:
         )
         self._xsp_width = self.xsp[1] - self.xsp[0]
 
-        # 2 parameters for pedestal
-        self.dof = len(init)
+        # dof of SPE model
+        self.dof = len(self.init) - 1
         self.C = self._log_l_C()
 
     # -----------
@@ -203,9 +207,7 @@ class PMT_Fitter:
 
         return hist_, y_
 
-    def compute_init(
-        self, hist, edges, peak_idx=0, distance=10, width=5, threshold=5, prominence=20
-    ):
+    def compute_init(self, hist, edges, peak_idx=0, distance=5, width=5, rel_height=1):
         """
         Compute initial values (mean, std) for a given peak in a histogram.
 
@@ -235,13 +237,9 @@ class PMT_Fitter:
         bin_centers = (edges[:-1] + edges[1:]) / 2
 
         # Find prominent peaks
-        peaks, props = find_peaks(
-            hist, width=width, threshold=threshold, prominence=prominence
-        )
+        peaks, props = find_peaks(hist, width=width, rel_height=rel_height)
         if len(peaks) <= peak_idx:
-            raise ValueError(
-                f"Only found {len(peaks)} peaks with prominence ≥ {prominence}"
-            )
+            raise ValueError(f"Only found {len(peaks)} peaks with prominence ≥ {width}")
 
         peak = peaks[peak_idx : peak_idx + 1]
         _, _, left_ips, right_ips = peak_widths(hist, peak, rel_height=0.5)
@@ -314,11 +312,24 @@ class PMT_Fitter:
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), occ)
+            (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
+            (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
         """
-        ser_args = args[: self.dof]
-        s_sp = fft(self._pdf(ser_args)) * self._xsp_width + self.const(ser_args)
-        sr_sp = np.exp(-np.log(1 - args[self.dof]) * (s_sp - 1))
+        start_idx = 2 if self._isWholeSpectrum else 0
+        ser_args = args[start_idx:-1]
+
+        if self._isWholeSpectrum:
+            ped_pdf = norm.pdf(self.xsp, loc=args[0], scale=args[1])
+            ped_pdf_r = fft(ped_pdf) * self._xsp_width
+
+        pdf = self._pdf(ser_args)
+        if not np.all(np.isfinite(pdf)):
+            raise ValueError("Non-finite value in PDF.")
+
+        s_sp = fft(pdf) * self._xsp_width + self.const(ser_args)
+        sr_sp = np.exp(-np.log(1 - args[-1]) * (s_sp - 1))
+        if self._isWholeSpectrum:
+            sr_sp *= ped_pdf_r
         sr_sp = np.real(ifft(sr_sp)) / self._xsp_width
         return sr_sp
 
@@ -328,7 +339,8 @@ class PMT_Fitter:
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), occ)
+            (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
+            (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
         n : int
             nPE
 
@@ -336,9 +348,15 @@ class PMT_Fitter:
         -----
         nPE contributes exp(-mu) / k! * [mu * s_sp]^k
         """
-        ser_args = args[: self.dof]
-        s_sp = fft(self._pdf(ser_args)) * self._xsp_width + self.const(ser_args)
-        mu = -np.log(1 - args[self.dof])
+        start_idx = 2 if self._isWholeSpectrum else 0
+        ser_args = args[start_idx:-1]
+
+        pdf = self._pdf(ser_args)
+        if not np.all(np.isfinite(pdf)):
+            raise ValueError("Non-finite value in PDF.")
+
+        s_sp = fft(pdf) * self._xsp_width + self.const(ser_args)
+        mu = -np.log(1 - args[-1])
         sr_sp_n = np.exp(-mu) * (mu * s_sp) ** n / np.prod(range(1, n + 1))
         sr_sp_n = np.real(ifft(sr_sp_n)) / self._xsp_width
         return sr_sp_n
@@ -379,8 +397,11 @@ class PMT_Fitter:
             self.composite_simpson, 1, y_sp_slice, self._interval, self.sample
         )
         # nonegative pdf set
-        y_est[y_est <= 0] = 1e-16
-        z_est = self.A * self._zero(args)
+        y_est[y_est < 0] = 0
+        # for whole spectrum, z_est doesn't matter because self.zero is 0
+        # otherwise, only SPE parameters are needed to calculate z_est
+        start_idx = 2 if self._isWholeSpectrum else 0
+        z_est = self.A * self._zero(args[start_idx:])
         return y_est, z_est
 
     def log_l(self, args) -> float:
@@ -389,14 +410,22 @@ class PMT_Fitter:
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), occ)
+            ((ped_mean, ped_sigma), ser_args_1, ..., ser_args_(dof), occ)
         """
-        # make sure args are in range
-        # otherwise an infinite "well"
-        if self.isParamsInBound(args, self.bounds):
-            y, z = self._estimate_count(args)
-            return self.zero * np.log(z) + np.sum(self.hist * np.log(y)) - self.C
-        else:
+        # make sure args are in range (an infinite "well")
+        try:
+            if self.isParamsInBound(args, self.bounds):
+                y, z = self._estimate_count(args)
+                return self.zero * np.log(z) + np.sum(self.hist * np.log(y)) - self.C
+            else:
+                return -np.inf
+        except ValueError as e:
+            print(
+                "[WARNING] Some chain(s) have Inf/NaN PDF value(s). Please improve the PDF robustness of your model."
+            )
+            print(
+                f"[DEBUG] args={args} ({'SPE' if self._isWholeSpectrum else 'Whole spectrum'})"
+            )
             return -np.inf
 
     def get_chi_sq(self, args) -> float:
@@ -462,21 +491,30 @@ class PMT_Fitter:
         self.samples_track = sampler.get_chain(discard=burn_in)[
             :, ind, :
         ]  # (step, ndim)
-        self.ser_args = np.mean(self.samples_track[:, : self.dof], axis=0)
-        self.ser_args_std = np.std(self.samples_track[:, : self.dof], axis=0)
-        occ = np.mean(self.samples_track[:, -1], axis=0)
-        args_complete = np.append(self.ser_args, occ)
+
+        args_complete = np.mean(self.samples_track, axis=0)
+        args_complete_std = np.std(self.samples_track, axis=0)
+
+        start_idx = 2 if self._isWholeSpectrum else 0
+        self.ser_args = args_complete[start_idx:-1]
+        self.ser_args_std = args_complete_std[start_idx:-1]
+        self.ped_args = args_complete[:start_idx] if self._isWholeSpectrum else None
+        self.ped_args_std = (
+            args_complete_std[:start_idx] if self._isWholeSpectrum else None
+        )
 
         # _zero() is a fix of real zero count
-        occReg = 1 - np.apply_along_axis(self._zero, axis=1, arr=self.samples_track)
+        occReg = 1 - np.apply_along_axis(
+            self._zero, axis=1, arr=self.samples_track[:, start_idx:]
+        )
         self.occ = np.mean(occReg, axis=0)
         self.occ_std = np.std(occReg, axis=0)
 
         self.gps = np.apply_along_axis(
-            self.get_gain, axis=1, arr=self.samples_track[:, : self.dof], gain="gp"
+            self.get_gain, axis=1, arr=self.samples_track[:, start_idx:-1], gain="gp"
         )
         self.gms = np.apply_along_axis(
-            self.get_gain, axis=1, arr=self.samples_track[:, : self.dof], gain="gm"
+            self.get_gain, axis=1, arr=self.samples_track[:, start_idx:-1], gain="gm"
         )
 
         print("----------")
@@ -718,8 +756,8 @@ class MCP_Fitter(PMT_Fitter):
         args : ArrayLike
             (frac, k, theta, lam, mean, std_variance, occupancy)
         """
-        frac, _, _, lam, _, _ = args[: self.dof]
-        mu = -np.log(1 - args[self.dof])
+        frac, _, _, lam, _, _, occ = args
+        mu = -np.log(1 - occ)
         return np.exp(mu * ((1 - frac) * np.exp(-lam) - 1))
 
     def _replace_spe_params(self, gp_init, sigma_init):
