@@ -2,10 +2,9 @@ import emcee
 import numpy as np
 
 from scipy.fft import fft, ifft
-from scipy.stats import gamma, norm
+from scipy.stats import gamma, norm, expon
 from scipy.signal import find_peaks, peak_widths
 from tweedie_pdf import tweedie_reckon
-from tweedie import tweedie
 
 
 class PMT_Fitter:
@@ -373,7 +372,8 @@ class PMT_Fitter:
         Parameters
         ----------
         args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), occ)
+            (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
+            (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
 
         Return
         ------
@@ -410,7 +410,8 @@ class PMT_Fitter:
         Parameters
         ----------
         args : ArrayLike
-            ((ped_mean, ped_sigma), ser_args_1, ..., ser_args_(dof), occ)
+            (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
+            (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
         """
         # make sure args are in range (an infinite "well")
         try:
@@ -434,7 +435,8 @@ class PMT_Fitter:
         Parameters
         ----------
         ser_args : ArrayLike
-        occs : ArrayLike
+            (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
+            (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
         """
         y, z = self._estimate_count(args)
         hist_reg, y_reg = self.merge_bins(self.hist, y)
