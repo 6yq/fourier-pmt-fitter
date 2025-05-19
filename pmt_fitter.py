@@ -1,4 +1,5 @@
 import emcee
+import operator
 import numpy as np
 
 from scipy.fft import fft, ifft
@@ -18,6 +19,7 @@ class PMT_Fitter:
         seterr: str = "warn",
         init=None,
         bounds=None,
+        constraints=None,
         auto_init=False,
     ):
         np.seterr(all=seterr)
@@ -28,6 +30,7 @@ class PMT_Fitter:
         self.bounds = (
             bounds.tolist() if isinstance(bounds, np.ndarray) else list(bounds)
         )
+        self.constraints = constraints or []
 
         if occ_init:  # given initial value
             self._occ_init = occ_init
@@ -147,6 +150,27 @@ class PMT_Fitter:
             if flag == False:
                 return False
         return flag
+
+    def isParamsWithinConstraints(self, args, constraints):
+        ops = {
+            ">": operator.gt,
+            ">=": operator.ge,
+            "<": operator.lt,
+            "<=": operator.le,
+            "==": operator.eq,
+        }
+
+        for constraint in constraints:
+            if isinstance(constraint, dict):
+                lhs = sum(coeff * args[idx] for idx, coeff in constraint["coeffs"])
+                rhs = constraint["threshold"]
+                op = ops.get(constraint.get("op", ">"))
+                if not op(lhs, rhs):
+                    return False
+            else:
+                raise ValueError(f"Unknown constraint format: {constraint}")
+
+        return True
 
     def merge_bins(self, hist, y, threshold=5):
         """
@@ -360,7 +384,7 @@ class PMT_Fitter:
         if n != 0:
             s_sp = fft(pdf) * self._xsp_width + self.const(ser_args)
             mu = -np.log(1 - args[-1])
-            sr_sp_n = np.exp(-mu) * (mu * s_sp) ** n / np.prod(range(1, n + 1))
+            sr_sp_n = np.exp(-mu) * ((mu * s_sp) ** n) / np.prod(range(1, n + 1))
             sr_sp_n = np.real(ifft(sr_sp_n)) / self._xsp_width
         elif self._isWholeSpectrum:
             return self._pdf_ped(args[:start_idx])
@@ -421,7 +445,9 @@ class PMT_Fitter:
         """
         # make sure args are in range (an infinite "well")
         try:
-            if self.isParamsInBound(args, self.bounds):
+            if self.isParamsInBound(
+                args, self.bounds
+            ) and self.isParamsWithinConstraints(args, self.constraints):
                 y, z = self._estimate_count(args)
                 return self.zero * np.log(z) + np.sum(self.hist * np.log(y)) - self.C
             else:
@@ -587,25 +613,35 @@ class MCP_Fitter(PMT_Fitter):
         sample=None,
         seterr: str = "warn",
         init=[
-            0.65,  # main peak ratio
+            0.50,  # main peak ratio
             400,  # main peak mean
             100,  # main peak sigma
-            4.0,  # secondary electron number
+            3.0,  # secondary electron number
             0.60,  # secondary electron mean / Q1
             0.15,  # secondary electron std variance / Q1
         ],
         bounds=[
-            (0.35, 1),
+            (0.0, 1.0),
             (0, None),  # mean
             (0, None),  # sigma
             (1, 7),  # secondary
             (0.3, 0.7),  # mean / Q1 based on Jun's work
             (0.05, 0.3),  # std variance / Q1 based on Jun's work
         ],
+        constraints=None,
         auto_init=False,
     ):
         super().__init__(
-            hist, bins, A, occ_init, sample, seterr, init, bounds, auto_init
+            hist,
+            bins,
+            A,
+            occ_init,
+            sample,
+            seterr,
+            init,
+            bounds,
+            constraints,
+            auto_init,
         )
 
     # -----------
@@ -778,7 +814,7 @@ class MCP_Fitter(PMT_Fitter):
 
     def _replace_spe_bounds(self, gp_bound, sigma_bound):
         gp_bound_ = (0.5 * gp_bound, 1.5 * gp_bound)
-        sigma_bound_ = (0.05 * sigma_bound, 5 * sigma_bound)
+        sigma_bound_ = (0.05 * sigma_bound, 3 * sigma_bound)
         self.bounds[1] = gp_bound_
         self.bounds[2] = sigma_bound_
 
@@ -823,10 +859,20 @@ class Dynode_Fitter(PMT_Fitter):
             (0, None),
             (0, None),
         ],
+        constraints=None,
         auto_init=False,
     ):
         super().__init__(
-            hist, bins, A, occ_init, sample, seterr, init, bounds, auto_init
+            hist,
+            bins,
+            A,
+            occ_init,
+            sample,
+            seterr,
+            init,
+            bounds,
+            constraints,
+            auto_init,
         )
 
     # ---------
@@ -921,10 +967,20 @@ class Mixture_Fitter(PMT_Fitter):
             (600, 1200),
             (0, 400),
         ],
+        constraints=None,
         auto_init=False,
     ):
         super().__init__(
-            hist, bins, A, occ_init, sample, seterr, init, bounds, auto_init
+            hist,
+            bins,
+            A,
+            occ_init,
+            sample,
+            seterr,
+            init,
+            bounds,
+            constraints,
+            auto_init,
         )
 
     # --------
