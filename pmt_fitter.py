@@ -2,7 +2,7 @@ import emcee
 import operator
 import numpy as np
 
-from scipy.fft import fft, ifft
+from scipy.fft import fft, ifft, fftfreq
 from scipy.stats import gamma, norm, expon
 from scipy.signal import find_peaks, peak_widths
 from tweedie_pdf import tweedie_reckon
@@ -95,17 +95,16 @@ class PMT_Fitter:
         self._bin_width = self.bins[1] - self.bins[0]
         self._xs = (self.bins[:-1] + self.bins[1:]) / 2
         self._interval = (self.bins[1] - self.bins[0]) / self.sample
-        # to cover the whole domain to perform loseless FFT
-        self._bwds = (
-            1 - int(-self.bins[0] // self._interval) if not self._isWholeSpectrum else 0
-        )
         self.xsp = np.linspace(
-            self.bins[0] - self._bwds * self._interval,
+            self.bins[0],
             self.bins[-1],
-            num=len(self.hist) * self.sample + self._bwds + 1,
+            num=len(self.hist) * self.sample + 1,
             endpoint=True,
         )
         self._xsp_width = self.xsp[1] - self.xsp[0]
+
+        k = fftfreq(len(self.xsp), d=self._xsp_width)
+        self._phase = np.exp(-2j * np.pi * k * self.xsp[0])
 
         # dof of SPE model
         self.dof = len(self.init) - 1
@@ -344,18 +343,19 @@ class PMT_Fitter:
         start_idx = 2 if self._isWholeSpectrum else 0
         ser_args = args[start_idx:-1]
 
-        if self._isWholeSpectrum:
-            ped_pdf = self._pdf_ped(args[:start_idx])
-            ped_pdf_r = fft(ped_pdf) * self._xsp_width
-
         pdf = self._pdf(ser_args)
         if not np.all(np.isfinite(pdf)):
             raise ValueError("Non-finite value in PDF.")
 
         s_sp = fft(pdf) * self._xsp_width + self.const(ser_args)
+        s_sp *= self._phase
         sr_sp = np.exp(-np.log(1 - args[-1]) * (s_sp - 1))
+
         if self._isWholeSpectrum:
+            ped_pdf = self._pdf_ped(args[:start_idx])
+            ped_pdf_r = fft(ped_pdf) * self._xsp_width
             sr_sp *= ped_pdf_r
+
         sr_sp = np.real(ifft(sr_sp)) / self._xsp_width
         return sr_sp
 
@@ -381,13 +381,25 @@ class PMT_Fitter:
         if not np.all(np.isfinite(pdf)):
             raise ValueError("Non-finite value in PDF.")
 
-        if n != 0:
-            s_sp = fft(pdf) * self._xsp_width + self.const(ser_args)
-            mu = -np.log(1 - args[-1])
-            sr_sp_n = np.exp(-mu) * ((mu * s_sp) ** n) / np.prod(range(1, n + 1))
-            sr_sp_n = np.real(ifft(sr_sp_n)) / self._xsp_width
-        elif self._isWholeSpectrum:
-            return self._pdf_ped(args[:start_idx])
+        if n == 0:
+            if self._isWholeSpectrum:
+                return self._pdf_ped(args[:start_idx])
+            else:
+                return np.zeros_like(self.xsp)
+
+        # # s_sp for convolution
+        s_sp = fft(pdf) * self._xsp_width + self.const(ser_args)
+        s_sp *= self._phase
+
+        mu = -np.log(1 - args[-1])
+        sr_sp_n = np.exp(-mu) * ((mu * s_sp) ** n) / np.prod(range(1, n + 1))
+
+        if self._isWholeSpectrum:
+            ped_pdf = self._pdf_ped(args[:start_idx])
+            ped_pdf_r = fft(ped_pdf) * self._xsp_width
+            sr_sp_n *= ped_pdf_r
+
+        sr_sp_n = np.real(ifft(sr_sp_n)) / self._xsp_width
         return sr_sp_n
 
     def _estimate_smooth(self, args):
@@ -415,11 +427,7 @@ class PMT_Fitter:
         y_sp = self.A * self._pdf_sr(args=args)
         y_sp_slice = np.array(
             [
-                y_sp[
-                    (self._bwds + self.sample * i) : (
-                        self._bwds + self.sample * (i + 1) + 1
-                    )
-                ]
+                y_sp[self.sample * i : self.sample * (i + 1) + 1]
                 for i in range(len(self.hist))
             ]
         )
