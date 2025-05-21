@@ -13,6 +13,7 @@ class PMT_Fitter:
         self,
         hist,
         bins,
+        isWholeSpectrum=False,
         A=None,
         occ_init=None,
         sample=None,
@@ -24,8 +25,8 @@ class PMT_Fitter:
     ):
         np.seterr(all=seterr)
 
-        self._isWholeSpectrum = A is None
-        self.A = sum(hist) if self._isWholeSpectrum else A
+        self._isWholeSpectrum = isWholeSpectrum
+        self.A = A if A is not None else sum(hist)
         self._init = init if isinstance(init, np.ndarray) else np.array(init)
         self.bounds = (
             bounds.tolist() if isinstance(bounds, np.ndarray) else list(bounds)
@@ -570,7 +571,7 @@ class PMT_Fitter:
         step: int = 200,
         seed: int = None,
         track: int = 1,
-        step_length: dict[str, float] = None,
+        step_length: list | np.ndarray = None,
     ):
         """MCMC fit using `emcee`.
 
@@ -696,6 +697,7 @@ class MCP_Fitter(PMT_Fitter):
         self,
         hist,
         bins,
+        isWholeSpectrum=False,
         A=None,
         occ_init=None,
         sample=None,
@@ -716,12 +718,19 @@ class MCP_Fitter(PMT_Fitter):
             (0.3, 0.7),  # mean / Q1 based on Jun's work
             (0.05, 0.3),  # std variance / Q1 based on Jun's work
         ],
-        constraints=None,
+        constraints=[
+            {
+                "coeffs": [(1, 1), (2, -1)],
+                "threshold": 0,
+                "op": ">",
+            },  # args[1] > args[2]
+        ],
         auto_init=False,
     ):
         super().__init__(
             hist,
             bins,
+            isWholeSpectrum,
             A,
             occ_init,
             sample,
@@ -935,6 +944,7 @@ class Dynode_Fitter(PMT_Fitter):
         self,
         hist,
         bins,
+        isWholeSpectrum=False,
         A=None,
         occ_init=None,
         sample=None,
@@ -953,6 +963,7 @@ class Dynode_Fitter(PMT_Fitter):
         super().__init__(
             hist,
             bins,
+            isWholeSpectrum,
             A,
             occ_init,
             sample,
@@ -1041,6 +1052,7 @@ class Mixture_Fitter(PMT_Fitter):
         self,
         hist,
         bins,
+        isWholeSpectrum=False,
         A=None,
         occ_init=None,
         sample=None,
@@ -1061,6 +1073,7 @@ class Mixture_Fitter(PMT_Fitter):
         super().__init__(
             hist,
             bins,
+            isWholeSpectrum,
             A,
             occ_init,
             sample,
