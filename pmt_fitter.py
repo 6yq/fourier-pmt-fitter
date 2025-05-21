@@ -103,12 +103,18 @@ class PMT_Fitter:
         )
         self._xsp_width = self.xsp[1] - self.xsp[0]
 
-        k = fftfreq(len(self.xsp), d=self._xsp_width)
-        self._phase = np.exp(-2j * np.pi * k * self.xsp[0])
+        # shift and padded to avoid wrap-around and phase shift
+        self._shift = int(round(self.xsp[0] / self._xsp_width))
+        self._n_origin = len(self.xsp)
+        # make sure padded won't wrap-around, then try to meet up with 2^n
+        self._pad_safe = max(
+            2 ** int(np.ceil(np.log2(self._n_origin))) - self._n_origin,
+            abs(self._shift),
+        )
 
         # dof of SPE model
         self.dof = len(self.init) - 1
-        self.C = self._log_l_C()
+        self._C = self._log_l_C()
 
     # -----------
     # helpingfunc
@@ -280,6 +286,69 @@ class PMT_Fitter:
 
         return gp_init, sigma_init
 
+    def roll_and_pad(self, pdf, shift):
+        """
+        Safely roll and pad the input PDF to align the x=0 position for FFT-based convolution.
+
+        Parameters
+        ----------
+        pdf : ndarray
+            The input probability density function (PDF), defined over xsp.
+        shift : int
+            The number of bins needed to align x=0 to the beginning of the array.
+            Computed as round(xsp[0] / dx).
+
+        Returns
+        -------
+        pdf_shifted : ndarray
+            The padded and rolled PDF, ready for FFT (with x=0 aligned at index 0).
+        shift_padded : int
+            The actual roll applied after padding, needed to reverse the shift after IFFT.
+
+        Notes
+        -----
+        - To avoid circular convolution (wrap-around artifacts), we pad the input with zeros.
+        - Padding direction:
+            * If shift >= 0 (xsp starts > 0): we pad on the left so that 0 lies before the data.
+            * If shift < 0  (xsp starts < 0): we pad on the right.
+        - We then roll the PDF so that the "x=0" location is placed at index 0.
+        - This setup allows the FFT/IFFT pair to behave like a true convolution starting from 0.
+        """
+        (pad_left, pad_right) = (
+            (self._pad_safe, 0) if shift >= 0 else (0, self._pad_safe)
+        )
+        pdf_padded = np.pad(
+            pdf, (pad_left, pad_right), mode="constant", constant_values=0
+        )
+
+        shift_padded = shift - self._pad_safe if shift >= 0 else shift
+        pdf_shifted = np.roll(pdf_padded, shift_padded)
+        return pdf_shifted, shift_padded
+
+    def fft_and_ifft(self, pdf, shift, dx, n_original, processor):
+        """
+        Parameters
+        ----------
+        pdf : ndarray
+            The input PDF in real space.
+        shift : int
+            Number of bins the input needs to be rolled so that 0 aligns to index 0.
+        dx : float
+            Bin width.
+        n_original : int
+            Number of original samples to return (after cropping).
+        processor : callable
+            A function that takes fft(pdf_shifted) and returns frequency-domain processed data.
+        """
+        pdf_shifted, shift_padded = self.roll_and_pad(pdf, shift)
+
+        fft_pdf_shifted = fft(pdf_shifted) * dx
+        fft_processed = processor(fft_pdf_shifted)
+
+        ifft_pdf = np.roll(np.real(ifft(fft_processed)) / dx, -shift_padded)
+
+        return ifft_pdf[-n_original:] if shift >= 0 else ifft_pdf[:n_original]
+
     # --------
     # property
     # --------
@@ -331,6 +400,19 @@ class PMT_Fitter:
     def _pdf_ped(self, args):
         return norm.pdf(self.xsp, loc=args[0], scale=args[1])
 
+    def _all_PE_processor(self, occupancy, b_sp):
+        if self._isWholeSpectrum:
+            return lambda s_sp: np.exp(-np.log(1 - occupancy) * (s_sp - 1)) * b_sp
+        else:
+            return lambda s_sp: np.exp(-np.log(1 - occupancy) * (s_sp - 1))
+
+    def _nPE_processor(self, occupancy, n):
+        return (
+            lambda s_sp: (1 - occupancy)
+            * ((-np.log(1 - occupancy) * s_sp) ** n)
+            / np.prod(range(1, n + 1))
+        )
+
     def _pdf_sr(self, args):
         """Applying DFT & IDFT to estimate pdf.
 
@@ -347,17 +429,21 @@ class PMT_Fitter:
         if not np.all(np.isfinite(pdf)):
             raise ValueError("Non-finite value in PDF.")
 
-        s_sp = fft(pdf) * self._xsp_width + self.const(ser_args)
-        s_sp *= self._phase
-        sr_sp = np.exp(-np.log(1 - args[-1]) * (s_sp - 1))
-
+        b_sp = None
         if self._isWholeSpectrum:
-            ped_pdf = self._pdf_ped(args[:start_idx])
-            ped_pdf_r = fft(ped_pdf) * self._xsp_width
-            sr_sp *= ped_pdf_r
+            ped_pdf_shifted, _ = self.roll_and_pad(
+                self._pdf_ped(args[:start_idx]), self._shift
+            )
 
-        sr_sp = np.real(ifft(sr_sp)) / self._xsp_width
-        return sr_sp
+            b_sp = fft(ped_pdf_shifted) * self._xsp_width
+
+        return self.fft_and_ifft(
+            pdf,
+            self._shift,
+            self._xsp_width,
+            self._n_origin,
+            self._all_PE_processor(args[-1], b_sp),
+        )
 
     def _pdf_sr_n(self, args, n):
         """Return n-order pdf.
@@ -385,22 +471,16 @@ class PMT_Fitter:
             if self._isWholeSpectrum:
                 return self._pdf_ped(args[:start_idx])
             else:
+                # For non-whole spectrum, 0 PE has no contribution
                 return np.zeros_like(self.xsp)
 
-        # # s_sp for convolution
-        s_sp = fft(pdf) * self._xsp_width + self.const(ser_args)
-        s_sp *= self._phase
-
-        mu = -np.log(1 - args[-1])
-        sr_sp_n = np.exp(-mu) * ((mu * s_sp) ** n) / np.prod(range(1, n + 1))
-
-        if self._isWholeSpectrum:
-            ped_pdf = self._pdf_ped(args[:start_idx])
-            ped_pdf_r = fft(ped_pdf) * self._xsp_width
-            sr_sp_n *= ped_pdf_r
-
-        sr_sp_n = np.real(ifft(sr_sp_n)) / self._xsp_width
-        return sr_sp_n
+        return self.fft_and_ifft(
+            pdf,
+            self._shift,
+            self._xsp_width,
+            self._n_origin,
+            self._nPE_processor(args[-1], n),
+        )
 
     def _estimate_smooth(self, args):
         return self.A * self._bin_width * self._pdf_sr(args=args)
@@ -457,7 +537,7 @@ class PMT_Fitter:
                 args, self.bounds
             ) and self.isParamsWithinConstraints(args, self.constraints):
                 y, z = self._estimate_count(args)
-                return self.zero * np.log(z) + np.sum(self.hist * np.log(y)) - self.C
+                return self.zero * np.log(z) + np.sum(self.hist * np.log(y)) - self._C
             else:
                 return -np.inf
         except ValueError as e:
