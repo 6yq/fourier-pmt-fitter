@@ -1,19 +1,21 @@
 # PMT-Fourier-Fitter
 
-A modular and customizable PMT (Photomultiplier Tube) charge spectrum fitter based on Fourier convolution.
+A modular and customizable PMT (Photomultiplier Tube) charge spectrum fitter based on FFT-based convolution.
 
-This package is designed to model and fit PMT charge spectra by simulating the convolution of single photoelectron (PE) responses with Poisson-distributed occupancies using FFT, allowing for detailed error propagation and model flexibility.
+This package is designed to model and fit PMT charge spectra by simulating the convolution of single photoelectron (PE) responses with Poisson-distributed occupancies using FFT, allowing for detailed error propagation, posterior sampling, and highly customizable physical modeling.
 
-This work is based on Kalousis's fitter [here](https://github.com/kalousis/PMTCalib/).
+This work is inspired by Kalousis's fitter [here](https://github.com/kalousis/PMTCalib/).
 
 ---
 
 ## 🔧 Features
 
-- ✨ **Customizable physical model**: plug in your own PE response shape
-- 📉 **nPE and all-PE modeling** with Poisson statistics
-- 🧮 **Error analysis** via MCMC posterior estimation
-- 🧩 Extendable to multi-component fits (e.g., pedestal + PE + afterpulse)
+- ✨ **Customizable physical models**: define your own PE response shapes and likelihood logic
+- 📈 **FFT-based convolution**: accurate and efficient modeling of nPE spectra
+- 🧮 **MCMC posterior sampling** for uncertainty quantification (via `emcee`)
+- 📏 **Chi-square, BIC, occupancy, gain statistics** available post-fit
+- 🧩 Supports complex models: pedestal, compound response, δ-like peak, etc.
+- ✅ **Constraint handling**: support for bounds and linear constraints
 
 ---
 
@@ -31,79 +33,83 @@ pip install .
 
 ## 📚 Dependencies
 
-The following will be automatically installed:
+This package requires:
 
 ```
-[numpy](https://numpy.org/)
-[scipy](https://scipy.org/)
-[emcee](https://emcee.readthedocs.io/)
+numpy
+scipy
+emcee
 ```
+
+They will be automatically installed via `pip`.
 
 ---
 
-## 📁 File Structure
+## 🛠 File Structure
 
 ```
 fourier-fitter/
-├── pmt_fitter.py       # Core class (FFT + PDF + likelihood)
-├── tweedie_pdf.py      # Custom compound distribution (optional)
-└── setup.py            # Package installer
+├── pmt_fitter.py       # Core fitter logic (base class)
+├── tweedie_pdf.py      # Optional: compound Gamma-Tweedie model
+└── setup.py            # Package metadata
 ```
 
 ---
 
-## 🚀 Example Usage
+## 🚀 Basic Usage
 
-### 🎨 fitting
+### 🔧 Quick Fit
 
 ```python
 from pmt_fitter import MCP_Fitter
 
-# hist, bins = np.histogram(charge_data, ...)
-# auto_init = True: automatically compute initial values based on the peaks on the histogram
-# Caution: the initial values are always mean and std of the peaks
+# Get histogram
+hist, bins = np.histogram(charge_data, bins=..., range=...)
+
+# Fit using auto-init (detects peaks automatically)
 fitter = MCP_Fitter(hist, bins, auto_init=True)
 fitter.fit()
 
-# Access parameters
-print(fitter.ser_args)
-print(fitter.occ)            # Occupancy
-print(fitter.chi_sq)         # Chi-square
-print(fitter.samples_track)  # Posterior samples
+# Access results
+print(fitter.occ, fitter.occ_std)
+print(fitter.ped_args, fitter.ped_args_std)
+print(fitter.ser_args, fitter.ser_args_std)
+print(fitter.chi_sq, fitter.ndf)
+print(fitter.BIC)
 ```
 
-Both **PE** and **without-threshold** spectra are supported.  
-The first two parameters within the model would be substituded with the mean and the standard deviation of the pedestal (assumed to be Gaussian distribution), respectively.
+**Note**:
+- If `isWholeSpectrum=True`, the pedestal will be automatically modeled as a Gaussian and its parameters occupy the first two slots in the parameter array.
+- The `fit()` method uses MCMC (`emcee`) and samples the posterior distribution. You can extract full trace via `samples_track` or `log_l_track`.
 
-### 🧩 Custom Model
+### 🔍 Checking MCMC Convergence
 
-The base class `PMT_Fitter` is designed to be easily extended for custom single-photoelectron (SPE) models.
+```python
+import matplotlib.pyplot as plt
+log_l_track = np.array(fitter.log_l_track)
 
-You can override `_pdf()` to define your own SPE shape (e.g. Gamma, Gaussian mixture, etc.), and supply the corresponding initial parameters, parameter bounds, and optional constraints for optimization.
+for i in range(log_l_track.shape[1]):
+    plt.plot(log_l_track[100:, i])  # discard burn-in if needed
 
-#### ✅ Supported Features
+plt.xscale("log")
+plt.xlabel("Step")
+plt.ylabel("Log Likelihood")
+plt.title("MCMC chain stability")
+plt.show()
+```
 
-- **Customizable initial values (`init`)**:  
-  List of model parameters to initialize the fitting.
-  
-- **Flexible parameter bounds (`bounds`)**:  
-  Each parameter can have a bounded interval `(lower, upper)`, or be unbounded using `None`.
+---
 
-- **Support for linear constraints (`constraints`)**:  
-  Expressed as dictionaries, like:
+## 🧩 Custom Model Design
 
-  ```python
-  constraints=[
-      {"coeffs": [(0, 1.0), (1, -0.5)], "threshold": 1.0, "op": ">="}  # param[0] - 0.5 * param[1] ≥ 1.0
-  ]
-  ```
+To use a custom PE model, subclass `PMT_Fitter` and override the following:
 
-  These constraints are enforced during likelihood evaluation to avoid unphysical regions.
+- `_pdf(self, args)` – returns the single-PE PDF given model parameters
+- `get_gain(self, args)` – estimate gain
+- (optional) `_zero()` and `const()` – for δ-like models (e.g., Tweedie)
+- `_replace_spe_params()` and `_replace_spe_bounds()` – for `auto_init=True` support
 
-- **Correction for gain and occupancy (`_gain()` and `_zero()`)**:  
-  Override these methods to apply gain and zero-suppression effects to the model spectrum.
-
-#### 🛠️ Example
+### ✅ Example: Custom Gamma Model
 
 ```python
 from pmt_fitter import PMT_Fitter
@@ -114,6 +120,7 @@ class Custom_PMT_Fitter(PMT_Fitter):
         self,
         hist,
         bins,
+        isWholeSpectrum=False,
         A=None,
         occ_init=None,
         sample=None,
@@ -161,7 +168,38 @@ class Custom_PMT_Fitter(PMT_Fitter):
         self.bounds[1] = sigma_bound_
 ```
 
-You may also override `_pdf_ped()` if you want to customize the pedestal (default: Gaussian). The framework will automatically compute the full model spectrum using FFT-based convolution with proper phase correction and occupancy effects.
+## 📏 Chi-Square Calculation
+
+To prevent instability due to sparse bins, chi-square is calculated by **merging bins** (lowest counts from edges inward) until each bin has ≥5 entries.
+
+This avoids low-statistic bins skewing the χ².  
+Different schemes (e.g., full merge on first low-count bin) are possible and can be customized.
+
+---
+
+## 📉 BIC: Bayesian Information Criterion
+
+BIC is computed as:
+
+```
+BIC = k * log(N) - 2 * logL
+```
+
+Where:
+- `k` = number of model parameters
+- `N` = total number of observations
+- `logL` = log-likelihood
+
+This allows comparing models with different complexity (e.g., Tweedie vs. Gamma) under a consistent selection principle.
+
+---
+
+## ⚠ Tips and Cautions
+
+- If using `auto_init=True`, the initial parameters are estimated from histogram peak shape using `compute_init()`. If your model uses different parameterization, be sure to map mean/std properly.
+- When `isWholeSpectrum=True`, your custom model will receive pedestal parameters inserted before the PE-related args.
+- A good rule: `nwalkers >= 2 × (number of parameters)` for MCMC convergence.
+- Occupancy and gain are inferred along with all model parameters in the posterior.
 
 ---
 
