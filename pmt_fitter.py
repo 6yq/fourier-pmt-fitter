@@ -609,8 +609,8 @@ class PMT_Fitter:
         # autocorr_time = sampler.get_autocorr_time(discard=burn_in)
 
         self.log_l_track = sampler.get_log_prob(thin=track)  # (step, nwalkers)
-        # select the max log-likelihood (last 1000 steps) chain
-        ind = np.argmax(np.mean(self.log_l_track[-1000:, :], axis=0))
+        # select the max log-likelihood (effective steps) chain
+        ind = np.argmax(np.mean(self.log_l_track[burn_in - step:, :], axis=0))
         self.samples_track = sampler.get_chain(discard=burn_in)[
             :, ind, :
         ]  # (step, ndim)
