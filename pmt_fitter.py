@@ -79,6 +79,7 @@ class PMT_Fitter:
                 )
             else:
                 spe_gp, spe_sigma = self.compute_init(self.hist, self.bins, peak_idx=0)
+                print(f"spe: {spe_gp} $\pm$ {spe_sigma}")
 
                 self._replace_spe_params(spe_gp, spe_sigma)
                 self._replace_spe_bounds(spe_gp, spe_sigma)
@@ -647,9 +648,18 @@ class PMT_Fitter:
         print(f"Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}")
         print("----------")
         print("Init params: " + ", ".join([f"{e:.4g}" for e in self.init]))
-        print(
-            "Pedetal params: " + f"{self.ped_args[0]:.4g} pm {self.ped_args_std[0]:.4g}"
-        )
+
+        if self._isWholeSpectrum:
+            print(
+                "Pedetal params: "
+                    + ", ".join(
+                    [
+                        f"{e:.4g} pm {f:.4g}"
+                        for e, f in zip(self.ped_args, self.ped_args_std)
+                    ]
+                )
+            )
+        
         print(
             "SER params: "
             + ", ".join(
