@@ -49,9 +49,19 @@ They will be automatically installed via `pip`.
 
 ```
 fourier-fitter/
-├── pmt_fitter.py       # Core fitter logic (base class)
-├── tweedie_pdf.py      # Optional: compound Gamma-Tweedie model
-└── setup.py            # Package metadata
+├── __init__.py
+├── core                # Core fitter logic (base class)
+│   ├── __init__.py
+│   ├── base.py         # Base class
+│   ├── fft_utils.py    # FFT-based convolution
+│   └── utils.py        # Helper functions
+├── models              # PMT charge models
+│   ├── __init__.py
+│   ├── dynode.py       # dynode PMT fitter goes here
+│   ├── mcp.py          # MCP PMT fitter goes here
+│   └── tweedie_pdf.py  # Helper function for MCP's Gamma-Tweedie model
+├── README.md
+└── setup.py            # Package metadata  
 ```
 
 ---
