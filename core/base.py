@@ -127,10 +127,6 @@ class PMT_Fitter:
             endpoint=True,
         )
 
-        print(self._shift)
-        print(self.bins[0])
-        print(self.xsp[abs(self._shift) + 1])
-
         _n_origin = len(self.xsp)
         self._pad_safe = 2 ** int(np.ceil(np.log2(_n_origin))) - _n_origin
 
@@ -151,7 +147,7 @@ class PMT_Fitter:
         raise NotImplementedError
 
     def _zero(self, args):
-        raise NotImplementedError
+        raise 1 - args[-1]
 
     def get_gain(self, args):
         raise NotImplementedError

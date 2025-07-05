@@ -1,5 +1,5 @@
-from core.base import PMT_Fitter
-from core.utils import (
+from .base import PMT_Fitter
+from .utils import (
     composite_simpson,
     isInBound,
     isParamsInBound,
@@ -7,4 +7,4 @@ from core.utils import (
     merge_bins,
     compute_init,
 )
-from core.fft_utils import fft_and_ifft, roll_and_pad
+from .fft_utils import fft_and_ifft, roll_and_pad

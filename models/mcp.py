@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.stats import gamma
-from core.base import PMT_Fitter
-from core.utils import compute_init
+from ..core.base import PMT_Fitter
+from ..core.utils import compute_init
 from .tweedie_pdf import tweedie_reckon
 
 

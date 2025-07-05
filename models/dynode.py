@@ -1,6 +1,6 @@
 import numpy as np
-from scipy.stats import norm
-from core.base import PMT_Fitter
+from scipy.stats import gamma
+from ..core.base import PMT_Fitter
 
 
 class Dynode_Fitter(PMT_Fitter):
