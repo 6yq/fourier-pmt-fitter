@@ -423,8 +423,7 @@ class PMT_Fitter:
             self._shift,
             self._xsp_width,
             self._pad_safe,
-            # self._all_PE_processor(args[-1], b_sp),
-            self._nPE_processor(args[-1], 4),
+            self._all_PE_processor(args[-1], b_sp),
             const,
         )
         return fourier_pdf * pass_threshold
