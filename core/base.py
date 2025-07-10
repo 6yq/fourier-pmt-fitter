@@ -1,6 +1,5 @@
 import emcee
 import numpy as np
-
 from scipy.fft import fft
 from scipy.stats import norm
 
@@ -31,11 +30,19 @@ class PMT_Fitter:
     sample : int
         The number of sample intervals between bins
     init : ArrayLike
-        Initial params of SER charge model, in the order of
-        "main peak ratio, main peak k/shape, main peak theta/rate,
-        secondary electron number, secondary alpha/shape, secondary beta/rate"
+        Initial params of SER charge model
     bounds : ArrayLike
         Initial bounds of SER charge model
+    constraints : ArrayLike
+        Constraints of SER charge model
+        Example: `[
+            {"coeffs": [(1, 1), (2, -2)], "threshold": 0, "op": ">"},
+        ]` stands for `params[1] - 2 * params[2] > 0`
+    threshold : None or str
+        The threshold effect to be applied to the PDF.
+        Should be one of "logistic", "erf", or None.
+    auto_init : bool
+        Whether to automatically initialize the model parameters.
     seterr : {'ignore', 'warn', 'raise', 'call', 'print', 'log'}
         see https://numpy.org/doc/stable/reference/generated/numpy.seterr.html
     """
@@ -48,15 +55,18 @@ class PMT_Fitter:
         A=None,
         occ_init=None,
         sample=None,
-        seterr: str = "warn",
         init=None,
         bounds=None,
         constraints=None,
+        threshold=None,
         auto_init=False,
+        seterr: str = "warn",
     ):
+        # -------------------------
+        #   Initial Data Handling
+        # -------------------------
         np.seterr(all=seterr)
         self.seterr = seterr
-
         self._isWholeSpectrum = isWholeSpectrum
         self.A = A if A is not None else sum(hist)
         self._init = init if isinstance(init, np.ndarray) else np.array(init)
@@ -83,15 +93,38 @@ class PMT_Fitter:
         if self._isWholeSpectrum:
             assert self.zero == 0, "[ERROR] have a zero bug, please post an issue :)"
 
-        if auto_init:
-            if self._isWholeSpectrum:
+        # threshold effect & pedestal both need 2 parameters
+        if self._isWholeSpectrum:
+            self._start_idx = 2
+        elif threshold is not None:
+            self._start_idx = 2
+        else:
+            self._start_idx = 0
+
+        # -------------------------
+        #     Produce Functions
+        # -------------------------
+        self._efficiency = self._produce_efficiency(threshold)
+        self._all_PE_processor = self._produce_all_PE_processor()
+        self._nPE_processor = self._produce_nPE_processor()
+        self._b_sp = self._produce_b_sp()
+        self._pdf_sr_n = self._produce_pdf_sr_n()
+        self._estimate_count = self._produce_estimate_counter()
+        self._constraint_checker = self._produce_constraint_checker()
+
+        # -------------------------
+        #     Auto Initialization
+        # -------------------------
+        if self._isWholeSpectrum:
+            if auto_init:
                 ped_gp, ped_sigma = compute_init(self.hist, self.bins, peak_idx=0)
-                print(f"ped: {ped_gp} ± {ped_sigma}")
+                print(f"[FIND PEAK] ped: {ped_gp} ± {ped_sigma}")
                 spe_gp, spe_sigma = compute_init(self.hist, self.bins, peak_idx=1)
-                print(f"spe: {spe_gp} ± {spe_sigma}")
+                print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
                 self._replace_spe_params(spe_gp, spe_sigma)
                 self._replace_spe_bounds(spe_gp, spe_sigma)
                 self.init = np.array([ped_gp, ped_sigma, *self._init, self._occ_init])
+
                 ped_peak_fluc = 5
                 ped_sigma_percentile = 0.2
                 self.bounds.insert(0, (ped_gp - ped_peak_fluc, ped_gp + ped_peak_fluc))
@@ -103,22 +136,51 @@ class PMT_Fitter:
                     ),
                 )
             else:
+                self.init = np.append(self._init, self._occ_init)
+        else:
+            if auto_init:
                 spe_gp, spe_sigma = compute_init(self.hist, self.bins, peak_idx=0)
-                print(f"spe: {spe_gp} ± {spe_sigma}")
+                print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
                 self._replace_spe_params(spe_gp, spe_sigma)
                 self._replace_spe_bounds(spe_gp, spe_sigma)
                 self.init = np.append(self._init, self._occ_init)
-        else:
-            self.init = np.append(self._init, self._occ_init)
+            elif threshold is not None:
+                # TODO: is bins[1] good enough to be the initial value?
+                threshold_center, threshold_scale = bins[1], 100
+                self.init = np.array(
+                    [threshold_center, threshold_scale, *self._init, self._occ_init]
+                )
+
+                threshold_center_fluc = bins[1]
+                threshold_scale_fluc = threshold_scale
+                self.bounds.insert(
+                    0,
+                    (
+                        0,
+                        bins[np.argmax(hist) + 1],
+                    ),
+                )
+                self.bounds.insert(
+                    1,
+                    (
+                        threshold_scale - threshold_scale_fluc,
+                        threshold_scale + threshold_scale_fluc,  # TODO: is 200 enough?
+                    ),
+                )
+            else:
+                self.init = np.append(self._init, self._occ_init)
 
         self.bounds.append((0, 1))
         self.bounds = tuple(self.bounds)
 
+        # -------------------------
+        #   Derived Attributes
+        # -------------------------
         self._bin_width = self.bins[1] - self.bins[0]
         self._xs = (self.bins[:-1] + self.bins[1:]) / 2
         self._interval = self._bin_width / self.sample
         self._xsp_width = self._bin_width / self.sample
-        self._shift = int(round(self.bins[0] / self._xsp_width))
+        self._shift = np.ceil(self.bins[0] / self._xsp_width).astype(int)
 
         self.xsp = np.linspace(
             self.bins[0] - abs(self._shift) * self._xsp_width,
@@ -133,9 +195,176 @@ class PMT_Fitter:
         self.dof = len(self.init) - 1
         self._C = self._log_l_C()
 
-    # -----------------
-    # must be implemented
-    # -----------------
+    # -------------------------
+    #  Produce Helper Functions
+    # -------------------------
+
+    def _produce_efficiency(self, threshold_type):
+        if not self._isWholeSpectrum:
+            if threshold_type == "logistic":
+                return lambda x, center, scale: 1 / (1 + np.exp(-(x - center) / scale))
+            elif threshold_type == "erf":
+                from scipy.special import erf
+
+                return lambda x, center, scale: 0.5 * (
+                    1 + erf((x - center) / (scale * np.sqrt(2)))
+                )
+            elif threshold_type is None:
+                return lambda x: np.ones_like(x)
+            else:
+                raise ValueError(f"Unknown threshold type: {threshold_type}")
+        else:
+            return lambda x: np.ones_like(x)
+
+    def _produce_all_PE_processor(self):
+        # TODO: correct proportions if SPE contains delta component
+        if self._isWholeSpectrum:
+            return (
+                lambda occupancy, b_sp: lambda s_sp: np.exp(
+                    -np.log(1 - occupancy) * (s_sp - 1)
+                )
+                * b_sp
+            )
+        else:
+            # return lambda occupancy, b_sp: lambda s_sp: np.exp(
+            #     -np.log(1 - occupancy) * (s_sp - 1)
+            # )
+            return lambda occupancy, b_sp: lambda s_sp: (1 - occupancy) * (
+                np.exp(-np.log(1 - occupancy) * s_sp) - 1
+            )
+
+    def _produce_nPE_processor(self):
+        return (
+            lambda occupancy, n: lambda s_sp: (1 - occupancy)
+            * ((-np.log(1 - occupancy) * s_sp) ** n)
+            / np.prod(range(1, n + 1))
+        )
+
+    def _produce_b_sp(self):
+        if self._isWholeSpectrum:
+            return (
+                lambda args: fft(
+                    roll_and_pad(
+                        self._pdf_ped(args[: self._start_idx]),
+                        self._shift,
+                        self._pad_safe,
+                    )[0]
+                )
+                * self._xsp_width
+            )
+        else:
+            return lambda args: None
+
+    def _produce_zero_pe(self):
+        if self._isWholeSpectrum:
+            return lambda args: self._pdf_ped(args[: self._start_idx])
+        else:
+            return lambda args: np.zeros_like(self.xsp)
+
+    def _produce_pdf_sr_n(self):
+        """Return n-order pdf.
+
+        Parameters
+        ----------
+        args : ArrayLike
+            (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
+            (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
+        n : int
+            nPE
+
+        Notes
+        -----
+        nPE contributes exp(-mu) / k! * [mu * s_sp]^k
+        """
+        if self._isWholeSpectrum:
+            return lambda args, n: (
+                self._pdf_ped(args[: self._start_idx])
+                if n == 0
+                else fft_and_ifft(
+                    self._pdf(args[self._start_idx : -1]),
+                    self._shift,
+                    self._xsp_width,
+                    self._pad_safe,
+                    self._nPE_processor(args[-1], n),
+                    self.const(args[self._start_idx : -1]),
+                )
+            )
+        else:
+            return lambda args, n: (
+                np.zeros_like(self.xsp)
+                if n == 0
+                else fft_and_ifft(
+                    self._pdf(args[self._start_idx : -1]),
+                    self._shift,
+                    self._xsp_width,
+                    self._pad_safe,
+                    self._nPE_processor(args[-1], n),
+                    self.const(args[self._start_idx : -1]),
+                )
+            )
+
+    def _produce_estimate_counter(self):
+        """Return a function that estimates counts of every bin.
+
+        Parameters
+        ----------
+        args : ArrayLike
+            (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
+            (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
+
+        Return
+        ------
+        y_est : ArrayLike
+            (entry_est_in_bin_1, ..., entry_est_in_bin_n)
+        z_est : float
+            Expected zero entries.
+
+        Notes
+        -----
+        For pdf which has a delta component, the bin containing 0 would finally has a delta proportion.
+        If the spectrum edge contains 0, then the first sampling point should be masked with 0.
+        """
+        need_mask_delta = self.bins[0] == 0
+
+        def counter(args):
+            y_sp = self.A * self._pdf_sr(args=args)
+
+            if need_mask_delta:
+                y_sp[0] = 0.0
+
+            slices = np.array(
+                [
+                    y_sp[
+                        abs(self._shift)
+                        + self.sample * i : abs(self._shift)
+                        + self.sample * (i + 1)
+                        + 1
+                    ]
+                    for i in range(len(self.hist))
+                ]
+            )
+
+            y_est = np.apply_along_axis(
+                composite_simpson, 1, slices, self._interval, self.sample
+            )
+            # nonegative pdf set
+            y_est[y_est <= 0] = 1e-20
+            # for whole spectrum, z_est doesn't matter because self.zero is 0
+            # otherwise, only SPE parameters are needed to calculate z_est
+            z_est = self.A - y_est.sum()
+            return y_est, z_est
+
+        return counter
+
+    def _produce_constraint_checker(self):
+        if self.constraints:
+            return lambda args: isParamsWithinConstraints(args, self.constraints)
+        else:
+            return lambda args: True
+
+    # -------------------------
+    #   Abstract & Utilities
+    # -------------------------
 
     def _replace_spe_params(self, gp_init, sigma_init):
         raise NotImplementedError
@@ -147,14 +376,13 @@ class PMT_Fitter:
         raise NotImplementedError
 
     def _zero(self, args):
-        raise 1 - args[-1]
+        return 1 - args[-1]
+
+    def const(self, args):
+        return 0
 
     def get_gain(self, args):
         raise NotImplementedError
-
-    # --------
-    # property
-    # --------
 
     def _log_l_C(self):
         """Return constant in log likelihood.
@@ -170,25 +398,8 @@ class PMT_Fitter:
         )
         return N_part + n_part
 
-    # ---------
-    # implement
-    # ---------
-
     def _pdf_ped(self, args):
         return norm.pdf(self.xsp, loc=args[0], scale=args[1])
-
-    def _all_PE_processor(self, occupancy, b_sp):
-        if self._isWholeSpectrum:
-            return lambda s_sp: np.exp(-np.log(1 - occupancy) * (s_sp - 1)) * b_sp
-        else:
-            return lambda s_sp: np.exp(-np.log(1 - occupancy) * (s_sp - 1))
-
-    def _nPE_processor(self, occupancy, n):
-        return (
-            lambda s_sp: (1 - occupancy)
-            * ((-np.log(1 - occupancy) * s_sp) ** n)
-            / np.prod(range(1, n + 1))
-        )
 
     def _pdf_sr(self, args):
         """Applying DFT & IDFT to estimate pdf.
@@ -199,63 +410,24 @@ class PMT_Fitter:
             (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
             (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
         """
-        start_idx = 2 if self._isWholeSpectrum else 0
-        ser_args = args[start_idx:-1]
-
+        ser_args = args[self._start_idx : -1]
         pdf = self._pdf(ser_args)
+        const = self.const(ser_args)
         if not np.all(np.isfinite(pdf)):
             raise ValueError("Non-finite value in PDF.")
 
-        b_sp = None
-        if self._isWholeSpectrum:
-            ped_pdf_shifted, _, _ = roll_and_pad(
-                self._pdf_ped(args[:start_idx]), self._shift, self._pad_safe
-            )
-            b_sp = fft(ped_pdf_shifted) * self._xsp_width
-
-        return fft_and_ifft(
+        b_sp = self._b_sp(args)
+        pass_threshold = self._efficiency(self.xsp, *args[: self._start_idx])
+        fourier_pdf = fft_and_ifft(
             pdf,
             self._shift,
             self._xsp_width,
             self._pad_safe,
-            self._all_PE_processor(args[-1], b_sp),
+            # self._all_PE_processor(args[-1], b_sp),
+            self._nPE_processor(args[-1], 4),
+            const,
         )
-
-    def _pdf_sr_n(self, args, n):
-        """Return n-order pdf.
-
-        Parameters
-        ----------
-        args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
-            (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
-        n : int
-            nPE
-
-        Notes
-        -----
-        nPE contributes exp(-mu) / k! * [mu * s_sp]^k
-        """
-        start_idx = 2 if self._isWholeSpectrum else 0
-        ser_args = args[start_idx:-1]
-
-        pdf = self._pdf(ser_args)
-        if not np.all(np.isfinite(pdf)):
-            raise ValueError("Non-finite value in PDF.")
-
-        if n == 0:
-            if self._isWholeSpectrum:
-                return self._pdf_ped(args[:start_idx])
-            else:
-                return np.zeros_like(self.xsp)
-
-        return fft_and_ifft(
-            pdf,
-            self._shift,
-            self._xsp_width,
-            self._pad_safe,
-            self._nPE_processor(args[-1], n),
-        )
+        return fourier_pdf * pass_threshold
 
     def _estimate_smooth(self, args):
         return self.A * self._bin_width * self._pdf_sr(args=args)[abs(self._shift) :]
@@ -266,45 +438,6 @@ class PMT_Fitter:
             * self._bin_width
             * self._pdf_sr_n(args=args, n=n)[abs(self._shift) :]
         )
-
-    def _estimate_count(self, args) -> tuple:
-        """Estimate counts of every bin.
-
-        Parameters
-        ----------
-        args : ArrayLike
-            (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
-            (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
-
-        Return
-        ------
-        y_est : ArrayLike
-            (entry_est_in_bin_1, ..., entry_est_in_bin_n)
-        z_est : float
-            Expected zero entries.
-        """
-        y_sp = self.A * self._pdf_sr(args=args)
-        y_sp_slice = np.array(
-            [
-                y_sp[
-                    abs(self._shift)
-                    + self.sample * i : abs(self._shift)
-                    + self.sample * (i + 1)
-                    + 1
-                ]
-                for i in range(len(self.hist))
-            ]
-        )
-        y_est = np.apply_along_axis(
-            composite_simpson, 1, y_sp_slice, self._interval, self.sample
-        )
-        # nonegative pdf set
-        y_est[y_est <= 0] = 1e-20
-        # for whole spectrum, z_est doesn't matter because self.zero is 0
-        # otherwise, only SPE parameters are needed to calculate z_est
-        start_idx = 2 if self._isWholeSpectrum else 0
-        z_est = self.A * self._zero(args[start_idx:])
-        return y_est, z_est
 
     def log_l(self, args) -> float:
         """log likelihood of given args.
@@ -317,8 +450,8 @@ class PMT_Fitter:
         """
         # make sure args are in range (an infinite "well")
         try:
-            if isParamsInBound(args, self.bounds) and isParamsWithinConstraints(
-                args, self.constraints
+            if isParamsInBound(args, self.bounds) and self._constraint_checker(
+                args[self._start_idx :]
             ):
                 y, z = self._estimate_count(args)
                 return self.zero * np.log(z) + np.sum(self.hist * np.log(y)) - self._C
@@ -376,10 +509,10 @@ class PMT_Fitter:
         `nwalkers >= 2 * ndim`, credits to Xuewei.
         """
         if seed is not None:
-            np.random.seed(seed)
+            rng = np.random.default_rng(seed)
 
         ndim = self.dof + 1
-        p0 = self.init + np.random.uniform(-1, 1, (nwalkers, ndim)) * step_length
+        p0 = self.init + rng.uniform(-1, 1, (nwalkers, ndim)) * step_length
 
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, self.log_l, moves=emcee.moves.WalkMove()
@@ -399,49 +532,60 @@ class PMT_Fitter:
         args_complete = np.mean(self.samples_track, axis=0)
         args_complete_std = np.std(self.samples_track, axis=0)
 
-        start_idx = 2 if self._isWholeSpectrum else 0
-        self.ser_args = args_complete[start_idx:-1]
-        self.ser_args_std = args_complete_std[start_idx:-1]
-        self.ped_args = args_complete[:start_idx] if self._isWholeSpectrum else None
-        self.ped_args_std = (
-            args_complete_std[:start_idx] if self._isWholeSpectrum else None
-        )
+        self.ser_args = args_complete[self._start_idx : -1]
+        self.ser_args_std = args_complete_std[self._start_idx : -1]
+
+        # for whole spectrum, additional args belong to pedestal
+        # otherwise, they are from threshold effect
+        self.additional_args = args_complete[: self._start_idx]
+        self.additional_args_std = args_complete_std[: self._start_idx]
 
         # _zero() is a fix of real zero count
         occReg = 1 - np.apply_along_axis(
-            self._zero, axis=1, arr=self.samples_track[:, start_idx:]
+            self._zero, axis=1, arr=self.samples_track[:, self._start_idx :]
         )
         self.occ = np.mean(occReg, axis=0)
         self.occ_std = np.std(occReg, axis=0)
 
         self.gps = np.apply_along_axis(
-            self.get_gain, axis=1, arr=self.samples_track[:, start_idx:-1], gain="gp"
+            self.get_gain,
+            axis=1,
+            arr=self.samples_track[:, self._start_idx : -1],
+            gain="gp",
         )
         self.gms = np.apply_along_axis(
-            self.get_gain, axis=1, arr=self.samples_track[:, start_idx:-1], gain="gm"
+            self.get_gain,
+            axis=1,
+            arr=self.samples_track[:, self._start_idx : -1],
+            gain="gm",
         )
 
-        print("----------")
         # print(f'Mean autocorrelation time: {autocorr_time} steps')
-        print(f"Current burn-in: {burn_in} steps")
-        print(f"Mean acceptance fraction: {np.mean(acceptance):.3f}")
-        print(f"Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}")
-        print("----------")
-        print("Init params: " + ", ".join([f"{e:.4g}" for e in self.init]))
+        print(f"[INFO] Current burn-in: {burn_in} steps")
+        print(f"[INFO] Mean acceptance fraction: {np.mean(acceptance):.3f}")
+        print(
+            f"[INFO] Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}"
+        )
+        print(f"[INFO] Init params: " + ", ".join([f"{e:.4g}" for e in self.init]))
 
-        if self._isWholeSpectrum:
-            print(
-                "Pedetal params: "
-                + ", ".join(
-                    [
-                        f"{e:.4g} pm {f:.4g}"
-                        for e, f in zip(self.ped_args, self.ped_args_std)
-                    ]
-                )
+        additional_args_stream = (
+            "Pedestal params: "
+            if self._isWholeSpectrum
+            else "Threshold effect params: "
+        )
+        print(
+            "[INFO] "
+            + additional_args_stream
+            + ", ".join(
+                [
+                    f"{e:.4g} pm {f:.4g}"
+                    for e, f in zip(self.additional_args, self.additional_args_std)
+                ]
             )
+        )
 
         print(
-            "SER params: "
+            "[INFO] SER params: "
             + ", ".join(
                 [
                     f"{e:.4g} pm {f:.4g}"
@@ -449,7 +593,9 @@ class PMT_Fitter:
                 ]
             )
         )
-        print("occ: " + ", ".join([f"{self.occ:.4g} pm {self.occ_std:.4g}"]))
+        print(
+            "[INFO] Occupancy: " + ", ".join([f"{self.occ:.4g} pm {self.occ_std:.4g}"])
+        )
 
         self.likelihood = self.log_l(args_complete)
         self.BIC = ndim * np.log(len(self.hist) + 1) - 2 * self.likelihood
