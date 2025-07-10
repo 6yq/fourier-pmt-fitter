@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.stats import gamma
+from scipy.stats import gamma, norm
 from ..core.base import PMT_Fitter
 
 
@@ -22,7 +22,6 @@ class Dynode_Fitter(PMT_Fitter):
         A=None,
         occ_init=None,
         sample=None,
-        seterr: str = "warn",
         init=[
             0.14,  # P(missing 1st dynode)
             2.8,  # P(multiplication missing)
@@ -36,7 +35,9 @@ class Dynode_Fitter(PMT_Fitter):
             (0, None),
         ],
         constraints=None,
+        threshold=None,
         auto_init=False,
+        seterr: str = "warn",
     ):
         super().__init__(
             hist,
@@ -45,11 +46,12 @@ class Dynode_Fitter(PMT_Fitter):
             A,
             occ_init,
             sample,
-            seterr,
             init,
             bounds,
             constraints,
+            threshold,
             auto_init,
+            seterr,
         )
 
     def _pdf_normal(self, x, df, mean, sigma):

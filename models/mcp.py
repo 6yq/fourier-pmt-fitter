@@ -14,7 +14,6 @@ class MCP_Fitter(PMT_Fitter):
         A=None,
         occ_init=None,
         sample=None,
-        seterr: str = "warn",
         init=[0.50, 400, 100, 3.0, 0.60, 0.15],
         bounds=[
             (0.0, 1.0),
@@ -27,7 +26,9 @@ class MCP_Fitter(PMT_Fitter):
         constraints=[
             {"coeffs": [(1, 1), (2, -1)], "threshold": 0, "op": ">"},
         ],
+        threshold=None,
         auto_init=False,
+        seterr: str = "warn",
     ):
         super().__init__(
             hist,
@@ -36,11 +37,12 @@ class MCP_Fitter(PMT_Fitter):
             A,
             occ_init,
             sample,
-            seterr,
             init,
             bounds,
             constraints,
+            threshold,
             auto_init,
+            seterr,
         )
 
     def const(self, args):
@@ -61,12 +63,13 @@ class MCP_Fitter(PMT_Fitter):
         return frac * gamma.pdf(x, a=k, scale=theta)
 
     def _pdf_tw(self, x, frac, mu, p, phi):
-        inreg = sum(x <= 0)
-        pdf = (1 - frac) * tweedie_reckon(
-            x[inreg:], p=p, mu=mu, phi=phi, dlambda=False
-        )[0]
-        for _ in range(inreg):
-            pdf = np.insert(pdf, 0, 0)
+        pdf = np.zeros_like(x)
+        lamb = mu ** (2 - p) / ((2 - p) * phi)
+        pdf[x > 0] = (
+            (1 - frac)
+            * tweedie_reckon(x[x > 0], p=p, mu=mu, phi=phi, dlambda=False)[0]
+            / (1 - np.exp(-lamb))
+        )
         return pdf
 
     def Gms(self, args, occ):
