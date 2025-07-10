@@ -507,8 +507,7 @@ class PMT_Fitter:
         -----
         `nwalkers >= 2 * ndim`, credits to Xuewei.
         """
-        if seed is not None:
-            rng = np.random.default_rng(seed)
+        rng = np.random.default_rng(42) if seed is None else np.random.default_rng(seed)
 
         ndim = self.dof + 1
         p0 = self.init + rng.uniform(-1, 1, (nwalkers, ndim)) * step_length
