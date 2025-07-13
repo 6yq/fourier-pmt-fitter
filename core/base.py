@@ -102,6 +102,26 @@ class PMT_Fitter:
             self._start_idx = 0
 
         # -------------------------
+        #   Derived Attributes
+        # -------------------------
+        self._bin_width = self.bins[1] - self.bins[0]
+        self._xs = (self.bins[:-1] + self.bins[1:]) / 2
+        self._interval = self._bin_width / self.sample
+        self._xsp_width = self._bin_width / self.sample
+        self._shift = np.ceil(self.bins[0] / self._xsp_width).astype(int)
+
+        self.xsp = np.linspace(
+            self.bins[0] - abs(self._shift) * self._xsp_width,
+            self.bins[-1],
+            num=len(self.hist) * self.sample + abs(self._shift) + 1,
+            endpoint=True,
+        )
+
+        _n_origin = len(self.xsp)
+        self._pad_safe = 2 ** int(np.ceil(np.log2(_n_origin))) - _n_origin
+        self._C = self._log_l_C()
+
+        # -------------------------
         #     Produce Functions
         # -------------------------
         self._efficiency = self._produce_efficiency(threshold)
@@ -143,16 +163,16 @@ class PMT_Fitter:
                 print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
                 self._replace_spe_params(spe_gp, spe_sigma)
                 self._replace_spe_bounds(spe_gp, spe_sigma)
-                self.init = np.append(self._init, self._occ_init)
-            elif threshold is not None:
+            if threshold is not None:
                 # TODO: is bins[1] good enough to be the initial value?
-                threshold_center, threshold_scale = bins[1], 100
+                # TODO: is bin_width good enought to be the initial value?
+                threshold_center, threshold_scale = bins[1], self._bin_width
                 self.init = np.array(
                     [threshold_center, threshold_scale, *self._init, self._occ_init]
                 )
-
-                threshold_center_fluc = bins[1]
-                threshold_scale_fluc = threshold_scale
+                # TODO: is 3 times bin width enough?
+                threshold_scale_fluc = 2 * threshold_scale
+                # threshold effect center should be between 0 and the SPE peak
                 self.bounds.insert(
                     0,
                     (
@@ -163,37 +183,16 @@ class PMT_Fitter:
                 self.bounds.insert(
                     1,
                     (
-                        threshold_scale - threshold_scale_fluc,
-                        threshold_scale + threshold_scale_fluc,  # TODO: is 200 enough?
+                        0,
+                        threshold_scale + threshold_scale_fluc,
                     ),
                 )
             else:
                 self.init = np.append(self._init, self._occ_init)
 
+        self.dof = len(self.init) - 1
         self.bounds.append((0, 1))
         self.bounds = tuple(self.bounds)
-
-        # -------------------------
-        #   Derived Attributes
-        # -------------------------
-        self._bin_width = self.bins[1] - self.bins[0]
-        self._xs = (self.bins[:-1] + self.bins[1:]) / 2
-        self._interval = self._bin_width / self.sample
-        self._xsp_width = self._bin_width / self.sample
-        self._shift = np.ceil(self.bins[0] / self._xsp_width).astype(int)
-
-        self.xsp = np.linspace(
-            self.bins[0] - abs(self._shift) * self._xsp_width,
-            self.bins[-1],
-            num=len(self.hist) * self.sample + abs(self._shift) + 1,
-            endpoint=True,
-        )
-
-        _n_origin = len(self.xsp)
-        self._pad_safe = 2 ** int(np.ceil(np.log2(_n_origin))) - _n_origin
-
-        self.dof = len(self.init) - 1
-        self._C = self._log_l_C()
 
     # -------------------------
     #  Produce Helper Functions
