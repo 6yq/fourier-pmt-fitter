@@ -170,8 +170,8 @@ class PMT_Fitter:
                 self.init = np.array(
                     [threshold_center, threshold_scale, *self._init, self._occ_init]
                 )
-                # TODO: is 3 times bin width enough?
-                threshold_scale_fluc = 2 * threshold_scale
+                # TODO: is 5 times bin width enough?
+                threshold_scale_fluc = 4 * threshold_scale
                 # threshold effect center should be between 0 and the SPE peak
                 self.bounds.insert(
                     0,
@@ -191,7 +191,12 @@ class PMT_Fitter:
                 self.init = np.append(self._init, self._occ_init)
 
         self.dof = len(self.init) - 1
-        self.bounds.append((0, 1))
+        self.bounds.append(
+            (
+                0.9 * self._occ_init,
+                1.1 * self._occ_init,
+            )
+        )
         self.bounds = tuple(self.bounds)
 
     # -------------------------
@@ -479,11 +484,14 @@ class PMT_Fitter:
     def fit(
         self,
         nwalkers: int = 32,
-        burn_in: int = 50,
+        stage_steps: int = 200,
+        max_stages: int = 20,
         step: int = 200,
         seed: int = None,
         track: int = 1,
         step_length: list | np.ndarray = None,
+        conv_factor: float = 20,
+        conv_change: float = 0.02,
     ):
         """MCMC fit using `emcee`.
 
@@ -491,16 +499,20 @@ class PMT_Fitter:
         ----------
         nwalkers : int
             Number of parallel chains for `emcee`.
-        burn_in : int
-            Burn in step for `emcee`.
-        step : int
-            MCMC step for `emcee`.
+        stage_steps : int
+            MCMC step for `emcee` in each stage.
+        max_stages : int
+            Maximum stages for `emcee`.
         seed : int
             Seed for random.
         track : int
             Take only every `track` steps from the chain.
         step_length : ndarray[float]
             Step length to generate initial values.
+        conv_factor : float
+            Convergence factor, N > conv_factor * τ.
+        conv_change : float
+            Change of τ to trigger convergence, τ change < conv_change.
 
         Notes
         -----
@@ -510,24 +522,71 @@ class PMT_Fitter:
 
         ndim = self.dof + 1
         p0 = self.init + rng.uniform(-1, 1, (nwalkers, ndim)) * step_length
+        moves = [
+            (emcee.moves.DEMove(sigma=1e-03), 0.8),
+            (emcee.moves.DESnookerMove(), 0.2),
+        ]
 
         sampler = emcee.EnsembleSampler(
-            nwalkers, ndim, self.log_l, moves=emcee.moves.WalkMove()
+            nwalkers,
+            ndim,
+            self.log_l,
+            moves=moves,
         )
-        sampler.run_mcmc(p0, step)
 
+        old_tau, state = np.inf, None
+        for stage in range(max_stages):
+            state = sampler.run_mcmc(state or p0, stage_steps, progress=True)
+
+            # get autocorrelation time
+            try:
+                tau = sampler.get_autocorr_time(tol=0)
+            except emcee.autocorr.AutocorrError:
+                # the chain is too short
+                continue
+
+            print(rf"[Stage {stage+1}] τ ≈ {tau.max():.1f}  (mean {tau.mean():.1f})")
+
+            converged = np.all(tau * conv_factor < sampler.iteration)
+            converged &= np.all(np.abs(old_tau - tau) / tau < conv_change)
+            old_tau = tau
+
+            if converged:
+                print(">>> Converged!")
+                break
+
+        burn_in = int(5 * old_tau.max())
+
+        print(f"[burn] steps: {burn_in}")
+
+        # (n_step, n_walker, n_param)
+        self.samples_track = sampler.get_chain(discard=burn_in, thin=track, flat=False)
+        self.log_l_track = sampler.get_log_prob(discard=burn_in, thin=track, flat=False)
+        flat_chain = self.samples_track.reshape(
+            -1, self.samples_track.shape[-1]
+        )  # (Nsamples, ndim)
+        args_complete = flat_chain.mean(axis=0)
+        args_complete_std = flat_chain.std(axis=0, ddof=1)
         acceptance = sampler.acceptance_fraction
-        # autocorr_time = sampler.get_autocorr_time(discard=burn_in)
 
-        self.log_l_track = sampler.get_log_prob(thin=track)  # (step, nwalkers)
-        # select the max log-likelihood (effective steps) chain
-        ind = np.argmax(np.mean(self.log_l_track[burn_in - step :, :], axis=0))
-        self.samples_track = sampler.get_chain(discard=burn_in)[
-            :, ind, :
-        ]  # (step, ndim)
+        # get integrated time and effective sample size
+        try:
+            tau_final = emcee.autocorr.integrated_time(
+                self.samples_track, c=5, tol=conv_factor, quiet=True
+            )
+        except emcee.autocorr.AutocorrError:
+            tau_final = np.full(ndim, np.nan)
 
-        args_complete = np.mean(self.samples_track, axis=0)
-        args_complete_std = np.std(self.samples_track, axis=0)
+        print(
+            rf"[INFO] τ final (max / mean): {np.nanmax(tau_final):.1f} / {np.nanmean(tau_final):.1f}"
+        )
+
+        N_tot = flat_chain.shape[0]  # total retained draws
+        ess = N_tot / tau_final  # effective sample size
+        # args_complete_std *= np.sqrt(tau_final)  # per-parameter MC error
+        print(f"[INFO] ESS (min/max): {np.nanmin(ess):.0f} / {np.nanmax(ess):.0f}")
+
+        sampler.reset()
 
         self.ser_args = args_complete[self._start_idx : -1]
         self.ser_args_std = args_complete_std[self._start_idx : -1]
@@ -539,7 +598,7 @@ class PMT_Fitter:
 
         # _zero() is a fix of real zero count
         occReg = 1 - np.apply_along_axis(
-            self._zero, axis=1, arr=self.samples_track[:, self._start_idx :]
+            self._zero, axis=1, arr=flat_chain[:, self._start_idx :]
         )
         self.occ = np.mean(occReg, axis=0)
         self.occ_std = np.std(occReg, axis=0)
@@ -547,17 +606,17 @@ class PMT_Fitter:
         self.gps = np.apply_along_axis(
             self.get_gain,
             axis=1,
-            arr=self.samples_track[:, self._start_idx : -1],
+            arr=flat_chain[:, self._start_idx : -1],
             gain="gp",
         )
         self.gms = np.apply_along_axis(
             self.get_gain,
             axis=1,
-            arr=self.samples_track[:, self._start_idx : -1],
+            arr=flat_chain[:, self._start_idx : -1],
             gain="gm",
         )
 
-        # print(f'Mean autocorrelation time: {autocorr_time} steps')
+        # print(f"Mean autocorrelation time: {autocorr_time} steps")
         print(f"[INFO] Current burn-in: {burn_in} steps")
         print(f"[INFO] Mean acceptance fraction: {np.mean(acceptance):.3f}")
         print(
