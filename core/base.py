@@ -61,6 +61,7 @@ class PMT_Fitter:
         threshold=None,
         auto_init=False,
         seterr: str = "warn",
+        **peak_kwargs,
     ):
         # -------------------------
         #   Initial Data Handling
@@ -137,9 +138,13 @@ class PMT_Fitter:
         # -------------------------
         if self._isWholeSpectrum:
             if auto_init:
-                ped_gp, ped_sigma = compute_init(self.hist, self.bins, peak_idx=0)
+                ped_gp, ped_sigma = compute_init(
+                    self.hist, self.bins, peak_idx=0, **peak_kwargs
+                )
                 print(f"[FIND PEAK] ped: {ped_gp} ± {ped_sigma}")
-                spe_gp, spe_sigma = compute_init(self.hist, self.bins, peak_idx=1)
+                spe_gp, spe_sigma = compute_init(
+                    self.hist, self.bins, peak_idx=1, **peak_kwargs
+                )
                 print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
                 self._replace_spe_params(spe_gp, spe_sigma)
                 self._replace_spe_bounds(spe_gp, spe_sigma)
@@ -159,7 +164,9 @@ class PMT_Fitter:
                 self.init = np.append(self._init, self._occ_init)
         else:
             if auto_init:
-                spe_gp, spe_sigma = compute_init(self.hist, self.bins, peak_idx=0)
+                spe_gp, spe_sigma = compute_init(
+                    self.hist, self.bins, peak_idx=0, **peak_kwargs
+                )
                 print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
                 self._replace_spe_params(spe_gp, spe_sigma)
                 self._replace_spe_bounds(spe_gp, spe_sigma)

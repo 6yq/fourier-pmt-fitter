@@ -165,7 +165,21 @@ def merge_bins(hist, y, threshold=5):
     return hist_, y_
 
 
-def compute_init(hist, edges, peak_idx=0, distance=5, width=5, rel_height=1):
+_FIND_PEAKS_KW = {
+    "height",
+    "threshold",
+    "distance",
+    "prominence",
+    "width",
+    "wlen",
+    "rel_height",
+    "plateau_size",
+}
+
+
+def compute_init(
+    hist, edges, *, peak_idx=0, distance=15, width=5, rel_height=1, **kwargs
+):
     """
     Compute initial values (mean, std) for a given peak in a histogram.
 
@@ -191,11 +205,21 @@ def compute_init(hist, edges, peak_idx=0, distance=5, width=5, rel_height=1):
     sigma_init : float
         Estimated standard deviation.
     """
+    fp_params = {
+        "distance": distance,
+        "width": width,
+        "rel_height": rel_height,
+    }
+    # override / append
+    for k, v in kwargs.items():
+        if k in _FIND_PEAKS_KW:
+            fp_params[k] = v
+
     edges = np.array(edges)
     bin_centers = (edges[:-1] + edges[1:]) / 2
 
     # Find prominent peaks
-    peaks, props = find_peaks(hist, width=width, rel_height=rel_height)
+    peaks, props = find_peaks(hist, **fp_params)
     if len(peaks) <= peak_idx:
         raise ValueError(f"Only found {len(peaks)} peaks with prominence ≥ {width}")
 
