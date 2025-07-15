@@ -197,7 +197,7 @@ class PMT_Fitter:
             else:
                 self.init = np.append(self._init, self._occ_init)
 
-        self.dof = len(self.init) - 1
+        self.dof = len(self.init)
         self.bounds.append(
             (
                 0.9 * self._occ_init,
@@ -527,7 +527,7 @@ class PMT_Fitter:
         """
         rng = np.random.default_rng(42) if seed is None else np.random.default_rng(seed)
 
-        ndim = self.dof + 1
+        ndim = self.dof
         p0 = self.init + rng.uniform(-1, 1, (nwalkers, ndim)) * step_length
         moves = [
             (emcee.moves.DEMove(sigma=1e-03), 0.8),
