@@ -14,14 +14,14 @@ class MCP_Fitter(PMT_Fitter):
         A=None,
         occ_init=None,
         sample=None,
-        init=[0.50, 400, 100, 3.0, 0.60, 0.15],
+        init=[0.60, 400, 100, 5.0, 0.35, 0.65],
         bounds=[
             (0.0, 1.0),
             (0, None),
             (0, None),
-            (1, 7),
-            (0.3, 0.7),
-            (0.05, 0.3),
+            (1, None),
+            (0, 1),
+            (0, 1),
         ],
         constraints=[
             {"coeffs": [(1, 1), (2, -1)], "threshold": 0, "op": ">"},
