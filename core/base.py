@@ -136,6 +136,10 @@ class PMT_Fitter:
         # -------------------------
         #     Auto Initialization
         # -------------------------
+
+        # FUCK. There is pedestal leakage...
+        # Might have to do both spectrum fitting and threshold correction...
+
         if self._isWholeSpectrum:
             if auto_init:
                 ped_gp, ped_sigma = compute_init(
