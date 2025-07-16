@@ -49,6 +49,7 @@ class Polya_Exp_Fitter(PMT_Fitter):
         threshold=None,
         auto_init=False,
         seterr: str = "warn",
+        **peak_kwargs,
     ):
         super().__init__(
             hist,
@@ -63,6 +64,7 @@ class Polya_Exp_Fitter(PMT_Fitter):
             threshold,
             auto_init,
             seterr,
+            **peak_kwargs,
         )
 
     def _pdf_polya(self, x, frac, mean, sigma):

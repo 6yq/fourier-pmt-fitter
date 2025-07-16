@@ -38,6 +38,7 @@ class Dynode_Fitter(PMT_Fitter):
         threshold=None,
         auto_init=False,
         seterr: str = "warn",
+        **peak_kwargs,
     ):
         super().__init__(
             hist,
@@ -52,6 +53,7 @@ class Dynode_Fitter(PMT_Fitter):
             threshold,
             auto_init,
             seterr,
+            **peak_kwargs,
         )
 
     def _pdf_normal(self, x, df, mean, sigma):
