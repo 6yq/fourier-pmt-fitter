@@ -108,4 +108,4 @@ class Dynode_Fitter(PMT_Fitter):
 
     def _replace_spe_bounds(self, gp_bound, sigma_bound):
         self.bounds[2] = (0.5 * gp_bound, 1.5 * gp_bound)
-        self.bounds[3] = (0.5 * sigma_bound, 1.5 * sigma_bound)
+        self.bounds[3] = (0.1 * sigma_bound, 2.0 * sigma_bound)
