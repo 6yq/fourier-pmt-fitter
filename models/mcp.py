@@ -14,7 +14,7 @@ class MCP_Fitter(PMT_Fitter):
         A=None,
         occ_init=None,
         sample=None,
-        init=[0.60, 400, 100, 5.0, 0.35, 0.65],
+        init=[0.60, 400, 100, 5.0, 0.40, 0.65],
         bounds=[
             (0.0, 1.0),
             (0, None),
@@ -126,10 +126,13 @@ class MCP_Fitter(PMT_Fitter):
         mu = -np.log(1 - occ)
         return np.exp(mu * ((1 - frac) * np.exp(-lam) - 1))
 
-    def _replace_spe_params(self, gp_init, sigma_init):
+    def _replace_spe_params(self, gp_init, sigma_init, occ=0):
+        # ha, some magic to correct sigma under different occupancy
+        coef = 1 + np.log(1 - occ) / 4
         self._init[1] = gp_init
-        self._init[2] = 0.8 * sigma_init
+        self._init[2] = 0.6 * coef * sigma_init
 
-    def _replace_spe_bounds(self, gp_bound, sigma_bound):
+    def _replace_spe_bounds(self, gp_bound, sigma_bound, occ=0):
+        coef = 1 + np.log(1 - occ) / 4
         self.bounds[1] = (0.5 * gp_bound, 1.5 * gp_bound)
-        self.bounds[2] = (0.05 * sigma_bound, 3 * sigma_bound)
+        self.bounds[2] = (0.05 * coef * sigma_bound, 3 * coef * sigma_bound)

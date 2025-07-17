@@ -154,8 +154,8 @@ class PMT_Fitter:
                     self.hist, self.bins, peak_idx=1, **peak_kwargs
                 )
                 print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
-                self._replace_spe_params(spe_gp, spe_sigma)
-                self._replace_spe_bounds(spe_gp, spe_sigma)
+                self._replace_spe_params(spe_gp, spe_sigma, self._occ_init)
+                self._replace_spe_bounds(spe_gp, spe_sigma, self._occ_init)
                 self.init = np.array([ped_gp, ped_sigma, *self._init, self._occ_init])
 
                 ped_peak_fluc = 5
@@ -176,8 +176,8 @@ class PMT_Fitter:
                     self.hist, self.bins, peak_idx=0, **peak_kwargs
                 )
                 print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
-                self._replace_spe_params(spe_gp, spe_sigma)
-                self._replace_spe_bounds(spe_gp, spe_sigma)
+                self._replace_spe_params(spe_gp, spe_sigma, self._occ_init)
+                self._replace_spe_bounds(spe_gp, spe_sigma, self._occ_init)
             if threshold is not None:
                 # TODO: is bins[1] good enough to be the initial value?
                 # TODO: is bin_width good enought to be the initial value?
@@ -213,6 +213,11 @@ class PMT_Fitter:
             )
         )
         self.bounds = tuple(self.bounds)
+
+        for i, b in zip(self.init, self.bounds):
+            print(
+                f"[INIT] init {i} with boundary {tuple(float(x) if x is not None else None for x in b)}"
+            )
 
     # -------------------------
     #  Produce Helper Functions

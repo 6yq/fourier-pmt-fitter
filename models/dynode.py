@@ -23,8 +23,8 @@ class Dynode_Fitter(PMT_Fitter):
         occ_init=None,
         sample=None,
         init=[
-            0.14,  # P(missing 1st dynode)
-            2.8,  # P(multiplication missing)
+            0.10,  # P(missing 1st dynode)
+            2.55,  # P(multiplication missing)
             667,  # Normal mean
             40,  # Normal sigma
         ],
@@ -102,10 +102,13 @@ class Dynode_Fitter(PMT_Fitter):
         else:
             raise NameError(f"{gain} is not a legal gain type")
 
-    def _replace_spe_params(self, gp_init, sigma_init):
+    def _replace_spe_params(self, gp_init, sigma_init, occ=0):
+        # ha, some magic to correct sigma under different occupancy
+        coef = 1 + np.log(1 - occ) / 4
         self._init[2] = gp_init
-        self._init[3] = sigma_init
+        self._init[3] = coef * sigma_init
 
-    def _replace_spe_bounds(self, gp_bound, sigma_bound):
+    def _replace_spe_bounds(self, gp_bound, sigma_bound, occ=0):
+        coef = 1 + np.log(1 - occ) / 4
         self.bounds[2] = (0.5 * gp_bound, 1.5 * gp_bound)
-        self.bounds[3] = (0.1 * sigma_bound, 2.0 * sigma_bound)
+        self.bounds[3] = (0.2 * coef * sigma_bound, 2.0 * coef * sigma_bound)
