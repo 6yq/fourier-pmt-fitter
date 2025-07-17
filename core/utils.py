@@ -239,3 +239,87 @@ def compute_init(
     sigma_init = fwhm / (2 * np.sqrt(2 * np.log(2)))
 
     return gp_init, sigma_init
+
+
+def merged_neyman_chi2(hist, y, zero, z, dof):
+    """Compute merged Neyman chi-square.
+
+    Parameters
+    ----------
+    hist : ArrayLike
+        Histogram of counts.(
+    y : ArrayLike
+        Estimated counts.
+    zero : int
+        Zero count.
+    z : float
+        Estimated zero count.
+    dof : int
+        Degrees of freedom.
+
+    Returns
+    -------
+    chi_sq : float
+        Merged Neyman chi-square.
+    ndf : int
+    """
+    hist_reg, y_reg = merge_bins(hist, y)
+    # actually len(hist_reg) + 1 - dof - 1
+    ndf = len(hist_reg) - dof
+    return sum((y_reg - hist_reg) ** 2 / y_reg) + (z - zero) ** 2 / z, ndf
+
+
+def modified_neyman_chi2(hist, y, zero, z, dof):
+    """Compute modified Neyman chi-square.
+
+    Parameters
+    ----------
+    hist : ArrayLike
+        Histogram of counts.
+    y : ArrayLike
+        Estimated counts.
+    zero : int
+        Zero count.
+    z : float
+        Estimated zero count.
+    dof : int
+        Degrees of freedom.
+
+    Returns
+    -------
+    chi_sq : float
+        Modified Neyman chi-square.
+    ndf : int
+    """
+    hist_ = np.append(hist, zero)
+    y_ = np.append(y, z)
+    ndf = len(hist) - dof
+    return sum((hist_ - y_) ** 2 / np.maximum(hist_, 1)), ndf
+
+
+def wheaton_chi2(hist, y, zero, z, dof):
+    """Compute Wheaton chi-square.
+
+    Parameters
+    ----------
+    hist : ArrayLike
+        Histogram of counts.
+    y : ArrayLike
+        Estimated counts.
+    zero : int
+        Zero count.
+    z : float
+        Estimated zero count.
+    dof : int
+        Degrees of freedom.
+
+    Returns
+    -------
+    chi_sq : float
+        Wheaton chi-square.
+    ndf : int
+    """
+    hist_ = np.append(hist, zero)
+    y_ = np.append(y, z)
+    ndf = len(hist) - dof
+    return sum((hist_ + np.minimum(hist_, 1) - y_) ** 2 / (hist_ + 1)), ndf

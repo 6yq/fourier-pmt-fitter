@@ -10,6 +10,9 @@ from .utils import (
     isParamsWithinConstraints,
     merge_bins,
     compute_init,
+    merged_neyman_chi2,
+    modified_neyman_chi2,
+    wheaton_chi2,
 )
 from .fft_utils import fft_and_ifft, roll_and_pad
 
@@ -478,19 +481,29 @@ class PMT_Fitter:
                 )
             return -np.inf
 
-    def get_chi_sq(self, args) -> float:
-        """Chi square.
+    def get_chi_sq(self, args, chiSqFunc: callable, dof: int) -> float:
+        """Get chi square.
 
         Parameters
         ----------
-        ser_args : ArrayLike
+        args : ArrayLike
             (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
             (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
+        chiSqFunc : callable
+            Function to compute chi-square.
+        dof : int
+            Degrees of freedom.
+
+        Notes
+        -----
+        There are so many ways to define chi-square...
+        We provide:
+        - Merged Neyman chi-square (lose information at low stat area)
+        - Modified Neyman chi-square (have bias)
+        - Wheaton chi-square
         """
         y, z = self._estimate_count(args)
-        hist_reg, y_reg = merge_bins(self.hist, y)
-        self.ndf = len(hist_reg) - self.dof
-        return sum((y_reg - hist_reg) ** 2 / y_reg) + (z - self.zero) ** 2 / z
+        return chiSqFunc(self.hist, y, self.zero, z, dof)
 
     def fit(
         self,
@@ -665,7 +678,14 @@ class PMT_Fitter:
         )
 
         self.likelihood = self.log_l(args_complete)
-        self.BIC = ndim * np.log(len(self.hist) + 1) - 2 * self.likelihood
-        self.chi_sq = self.get_chi_sq(args_complete)
+        self.chi_sq_merged_neyman, self.ndf_merged = self.get_chi_sq(
+            args_complete, merged_neyman_chi2, dof=self.dof
+        )
+        self.chi_sq_neyman, self.ndf = self.get_chi_sq(
+            args_complete, modified_neyman_chi2, dof=self.dof
+        )
+        self.chi_sq_wheaton, _ = self.get_chi_sq(
+            args_complete, wheaton_chi2, dof=self.dof
+        )
         self.smooth = self._estimate_smooth(args_complete)
         self.ys, self.zs = self._estimate_count(args_complete)
