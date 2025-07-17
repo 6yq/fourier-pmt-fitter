@@ -241,8 +241,8 @@ def compute_init(
     return gp_init, sigma_init
 
 
-def merged_neyman_chi2(hist, y, zero, z, dof):
-    """Compute merged Neyman chi-square.
+def merged_pearson_chi2(hist, y, zero, z, dof):
+    """Compute merged Pearson chi-square.
 
     Parameters
     ----------
@@ -260,16 +260,20 @@ def merged_neyman_chi2(hist, y, zero, z, dof):
     Returns
     -------
     chi_sq : float
-        Merged Neyman chi-square.
+        Merged Pearson chi-square.
     ndf : int
+
+    Notes
+    -----
+    Hmm, I don't recommend this.
     """
-    hist_reg, y_reg = merge_bins(hist, y)
+    y_reg, hist_reg = merge_bins(y, hist, threshold=5)
     # actually len(hist_reg) + 1 - dof - 1
     ndf = len(hist_reg) - dof
     return sum((y_reg - hist_reg) ** 2 / y_reg) + (z - zero) ** 2 / z, ndf
 
 
-def modified_neyman_chi2(hist, y, zero, z, dof):
+def modified_neyman_chi2_A(hist, y, zero, z, dof):
     """Compute modified Neyman chi-square.
 
     Parameters
@@ -290,15 +294,23 @@ def modified_neyman_chi2(hist, y, zero, z, dof):
     chi_sq : float
         Modified Neyman chi-square.
     ndf : int
+
+    Notes
+    -----
+    This is from Cressie-Read family.
+    I believe this is the case when lambda -> -2.
     """
     hist_ = np.append(hist, zero)
     y_ = np.append(y, z)
-    ndf = len(hist) - dof
-    return sum((hist_ - y_) ** 2 / np.maximum(hist_, 1)), ndf
+    nonZeroIdx = hist_ != 0
+    hist_ = hist_[nonZeroIdx]
+    y_ = y_[nonZeroIdx]
+    ndf = len(hist_) - dof - 1
+    return sum(y_**2 / hist_ - hist_), ndf
 
 
-def wheaton_chi2(hist, y, zero, z, dof):
-    """Compute Wheaton chi-square.
+def modified_neyman_chi2_B(hist, y, zero, z, dof):
+    """Compute modified Neyman chi-square.
 
     Parameters
     ----------
@@ -316,10 +328,52 @@ def wheaton_chi2(hist, y, zero, z, dof):
     Returns
     -------
     chi_sq : float
-        Wheaton chi-square.
+        Modified Neyman chi-square.
     ndf : int
+
+    Notes
+    -----
+    This is to avoid O = 0.
     """
     hist_ = np.append(hist, zero)
     y_ = np.append(y, z)
-    ndf = len(hist) - dof
-    return sum((hist_ + np.minimum(hist_, 1) - y_) ** 2 / (hist_ + 1)), ndf
+    nonZeroIdx = hist_ != 0
+    hist_ = hist_[nonZeroIdx]
+    y_ = y_[nonZeroIdx]
+    ndf = len(hist_) - dof - 1
+    return sum((y_ - hist_) ** 2 / hist_), ndf
+
+
+def mighell_chi2(hist, y, zero, z, dof):
+    """Compute Mighell chi-square.
+
+    Parameters
+    ----------
+    hist : ArrayLike
+        Histogram of counts.
+    y : ArrayLike
+        Estimated counts.
+    zero : int
+        Zero count.
+    z : float
+        Estimated zero count.
+    dof : int
+        Degrees of freedom.
+
+    Returns
+    -------
+    chi_sq : float
+        Mighell chi-square.
+    ndf : int
+
+    Notes
+    -----
+    Hmm, this might be awkward because we have many bins with zero counts.
+    """
+    hist_ = np.append(hist, zero)
+    y_ = np.append(y, z)
+    nonZeroIdx = hist_ != 0
+    hist_ = hist_[nonZeroIdx]
+    y_ = y_[nonZeroIdx]
+    ndf = len(hist_) - dof - 1
+    return sum((hist_ + 1 - y_) ** 2 / (hist_ + 1)), ndf

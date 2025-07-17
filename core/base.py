@@ -10,9 +10,10 @@ from .utils import (
     isParamsWithinConstraints,
     merge_bins,
     compute_init,
-    merged_neyman_chi2,
-    modified_neyman_chi2,
-    wheaton_chi2,
+    merged_pearson_chi2,
+    modified_neyman_chi2_A,
+    modified_neyman_chi2_B,
+    mighell_chi2,
 )
 from .fft_utils import fft_and_ifft, roll_and_pad
 
@@ -498,9 +499,10 @@ class PMT_Fitter:
         -----
         There are so many ways to define chi-square...
         We provide:
-        - Merged Neyman chi-square (lose information at low stat area)
-        - Modified Neyman chi-square (have bias)
-        - Wheaton chi-square
+        - Merged Pearson chi-square (hmm, not good for low stat area)
+        - Modified Neyman chi-square (from Cressie-Read family)
+        - Modified Neyman chi-square (min(O, 1))
+        - Mighell chi-square
         """
         y, z = self._estimate_count(args)
         return chiSqFunc(self.hist, y, self.zero, z, dof)
@@ -542,6 +544,8 @@ class PMT_Fitter:
         -----
         `nwalkers >= 2 * ndim`, credits to Xuewei.
         """
+        if seed is not None:
+            np.random.seed(seed)
         rng = np.random.default_rng(42) if seed is None else np.random.default_rng(seed)
 
         ndim = self.dof
@@ -678,14 +682,17 @@ class PMT_Fitter:
         )
 
         self.likelihood = self.log_l(args_complete)
-        self.chi_sq_merged_neyman, self.ndf_merged = self.get_chi_sq(
-            args_complete, merged_neyman_chi2, dof=self.dof
+        self.chi_sq_pearson, self.ndf_merged = self.get_chi_sq(
+            args_complete, merged_pearson_chi2, dof=self.dof
         )
-        self.chi_sq_neyman, self.ndf = self.get_chi_sq(
-            args_complete, modified_neyman_chi2, dof=self.dof
+        self.chi_sq_neyman_A, self.ndf = self.get_chi_sq(
+            args_complete, modified_neyman_chi2_A, dof=self.dof
         )
-        self.chi_sq_wheaton, _ = self.get_chi_sq(
-            args_complete, wheaton_chi2, dof=self.dof
+        self.chi_sq_neyman_B, _ = self.get_chi_sq(
+            args_complete, modified_neyman_chi2_B, dof=self.dof
+        )
+        self.chi_sq_mighell, _ = self.get_chi_sq(
+            args_complete, mighell_chi2, dof=self.dof
         )
         self.smooth = self._estimate_smooth(args_complete)
         self.ys, self.zs = self._estimate_count(args_complete)
