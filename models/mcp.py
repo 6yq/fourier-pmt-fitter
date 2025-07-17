@@ -67,9 +67,13 @@ class MCP_Fitter(PMT_Fitter):
     def _pdf_tw(self, x, frac, mu, p, phi):
         pdf = np.zeros_like(x)
         lamb = mu ** (2 - p) / ((2 - p) * phi)
-        pdf[x > 0] = (
+        # If unfortunately the sample point is too small,
+        # there would be exponential explosion,
+        # so we set a small eps to avoid this.
+        eps = 1e-03
+        pdf[x > eps] = (
             (1 - frac)
-            * tweedie_reckon(x[x > 0], p=p, mu=mu, phi=phi, dlambda=False)[0]
+            * tweedie_reckon(x[x > eps], p=p, mu=mu, phi=phi, dlambda=False)[0]
             / (1 - np.exp(-lamb))
         )
         return pdf
