@@ -57,12 +57,14 @@ class Dynode_Fitter(PMT_Fitter):
         )
 
     def _pdf_normal(self, x, df, mean, sigma):
-        return (1 - df) * norm.pdf(x, loc=mean, scale=sigma)
+        inv = 1.0 / (np.sqrt(2.0 * np.pi) * sigma)
+        return (1 - df) * inv * np.exp(-0.5 * ((x - mean) / sigma) ** 2)
 
     def _pdf_missing(self, x, df, ds, mean, sigma):
         mean_ = mean / ds
         sigma_ = sigma / ds
-        return df * norm.pdf(x, loc=mean_, scale=sigma_)
+        inv = 1.0 / (np.sqrt(2.0 * np.pi) * sigma_)
+        return df * inv * np.exp(-0.5 * ((x - mean_) / sigma_) ** 2)
 
     def _pdf(self, args):
         df, ds, mean, sigma = args
