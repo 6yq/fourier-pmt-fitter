@@ -1,5 +1,8 @@
 import emcee
 import numpy as np
+import ROOT
+
+# from ctypes import c_double
 from scipy.fft import fft
 from scipy.stats import norm
 
@@ -8,7 +11,6 @@ from .utils import (
     isInBound,
     isParamsInBound,
     isParamsWithinConstraints,
-    merge_bins,
     compute_init,
     merged_pearson_chi2,
     modified_neyman_chi2_A,
@@ -522,12 +524,11 @@ class PMT_Fitter:
         y, z = self._estimate_count(args)
         return chiSqFunc(self.hist, y, self.zero, z, dof)
 
-    def fit(
+    def _fit_mcmc(
         self,
         nwalkers: int = 32,
         stage_steps: int = 200,
         max_stages: int = 20,
-        step: int = 200,
         seed: int = None,
         track: int = 1,
         step_length: list | np.ndarray = None,
@@ -717,3 +718,109 @@ class PMT_Fitter:
         )
         self.smooth = self._estimate_smooth(args_complete)
         self.ys, self.zs = self._estimate_count(args_complete)
+
+    def _fit_minuit(self, *, strategy=1, tol=1e-01, max_calls=10000, print_level=1):
+        """Fit with Minuit.
+
+        Parameters
+        ----------
+        strategy : int
+            Minuit strategy.
+        tol : float
+            Tolerance of convergence.
+        max_calls : int
+            Maximum number of function calls.
+        print_level : int
+            Print level of Minuit.
+        """
+
+        # consistent nll wrapper for log likelihood function
+        def _nll_wrap(par_ptr):
+            # par_ptr behaves like C double* (indexable)
+            args = np.array([par_ptr[i] for i in range(self.dof)], dtype=float)
+            ll = self.log_l(args)
+            return 1e30 if not np.isfinite(ll) else -ll
+
+        # this is to prevent GC clear _nll_wrap
+        self._nll_wrap = _nll_wrap
+
+        self._fcn = ROOT.Math.Functor(self._nll_wrap, self.dof)
+        m = ROOT.Math.Factory.CreateMinimizer("Minuit2", "Migrad")
+        m.SetFunction(self._fcn)
+        m.SetStrategy(strategy)
+        m.SetErrorDef(0.5)
+        m.SetTolerance(tol)
+        m.SetMaxFunctionCalls(max_calls)
+        m.SetPrintLevel(print_level)
+
+        # give initial value and box constraints
+        for i, (v0, lim) in enumerate(zip(self.init, self.bounds)):
+            step = 0.1 * (abs(v0) if v0 else 1.0)
+            lo, hi = lim
+            name = f"p{i}"
+            if lo is None and hi is None:
+                m.SetVariable(i, name, float(v0), step)
+            elif lo is not None and hi is not None:
+                m.SetLimitedVariable(i, name, float(v0), step, float(lo), float(hi))
+            elif lo is not None:
+                m.SetLowerLimitedVariable(i, name, float(v0), step, float(lo))
+            else:
+                m.SetUpperLimitedVariable(i, name, float(v0), step, float(hi))
+
+        ok = m.Minimize()
+        if not ok:
+            if strategy != 2:
+                m.SetStrategy(strategy=2)
+                ok = m.Minimize()
+                if not ok:
+                    print(
+                        "[WARN] Minuit did not converge (EDM>tol or max_calls reached)."
+                    )
+            else:
+                print("[WARN] Minuit did not converge (EDM>tol or max_calls reached).")
+        m.Hesse()
+
+        args_complete = np.array([m.X()[i] for i in range(self.dof)])
+        args_complete_std = np.array([m.Errors()[i] for i in range(self.dof)])
+
+        self.additional_args = args_complete[: self._start_idx]
+        self.additional_args_std = args_complete_std[: self._start_idx]
+        self.ser_args = args_complete[self._start_idx : -1]
+        self.ser_args_std = args_complete_std[self._start_idx : -1]
+        self.occ, self.occ_std = args_complete[-1], args_complete_std[-1]
+
+        self.gps = self.get_gain(self.ser_args, "gp")
+        self.gms = self.get_gain(self.ser_args, "gm")
+
+        self.likelihood = -m.MinValue()
+        self.chi_sq_pearson, self.ndf_merged = self.get_chi_sq(
+            args_complete, merged_pearson_chi2, dof=self.dof
+        )
+        self.chi_sq_neyman_A, self.ndf = self.get_chi_sq(
+            args_complete, modified_neyman_chi2_A, dof=self.dof
+        )
+        self.chi_sq_neyman_B, _ = self.get_chi_sq(
+            args_complete, modified_neyman_chi2_B, dof=self.dof
+        )
+        self.chi_sq_mighell, _ = self.get_chi_sq(
+            args_complete, mighell_chi2, dof=self.dof
+        )
+        self.smooth = self._estimate_smooth(args_complete)
+        self.ys, self.zs = self._estimate_count(args_complete)
+
+    def fit(self, method="minuit", **kwargs):
+        """Fit with MCMC or Minuit.
+
+        Parameters
+        ----------
+        method : str
+            Fitting method.
+        kwargs : dict
+            Fitting parameters.
+        """
+        if method == "mcmc":
+            return self._fit_mcmc(**kwargs)
+        elif method == "minuit":
+            return self._fit_minuit(**kwargs)
+        else:
+            raise ValueError("method must be 'mcmc' or 'minuit'")
