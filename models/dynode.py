@@ -25,8 +25,8 @@ class Dynode_Fitter(PMT_Fitter):
         init=[
             0.10,  # P(missing 1st dynode)
             2.55,  # P(multiplication missing)
-            667,  # Normal mean
-            40,  # Normal sigma
+            0.8,  # Normal mean
+            0.25,  # Normal sigma
         ],
         bounds=[
             (0, 1),
