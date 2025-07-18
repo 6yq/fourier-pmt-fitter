@@ -354,6 +354,11 @@ class PMT_Fitter:
         If the spectrum edge contains 0, then the first sampling point should be masked with 0.
         """
         need_mask_delta = self.bins[0] == 0
+        w = np.ones(self.sample + 1)
+        w[1:-1:2] = 4
+        w[2:-2:2] = 2
+        w *= self._interval / 3
+        self._simp_w = w
 
         def counter(args):
             y_sp = self.A * self._pdf_sr(args=args)
@@ -361,21 +366,17 @@ class PMT_Fitter:
             if need_mask_delta:
                 y_sp[0] = 0.0
 
-            slices = np.array(
-                [
-                    y_sp[
-                        abs(self._shift)
-                        + self.sample * i : abs(self._shift)
-                        + self.sample * (i + 1)
-                        + 1
-                    ]
-                    for i in range(len(self.hist))
-                ]
+            nbin = len(self.hist)
+            # indices[i, j] = abs_shift + sample*i + j
+            idx = (
+                abs(self._shift)
+                + self.sample * np.arange(nbin)[:, None]
+                + np.arange(self.sample + 1)[None, :]
             )
+            seg = y_sp[idx]  # (nbin, sample+1)
 
-            y_est = np.apply_along_axis(
-                composite_simpson, 1, slices, self._interval, self.sample
-            )
+            y_est = seg @ self._simp_w
+
             # nonegative pdf set
             y_est[y_est <= 0] = 1e-20
             # for whole spectrum, z_est doesn't matter because self.zero is 0
