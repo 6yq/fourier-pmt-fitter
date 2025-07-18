@@ -17,6 +17,8 @@ from .utils import (
 )
 from .fft_utils import fft_and_ifft, roll_and_pad
 
+from multiprocessing import Pool
+
 
 class PMT_Fitter:
     """A class to fit MCP-PMT charge spectrum.
@@ -172,12 +174,15 @@ class PMT_Fitter:
                 self.init = np.append(self._init, self._occ_init)
         else:
             if auto_init:
-                spe_gp, spe_sigma = compute_init(
-                    self.hist, self.bins, peak_idx=0, **peak_kwargs
-                )
-                print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
-                self._replace_spe_params(spe_gp, spe_sigma, self._occ_init)
-                self._replace_spe_bounds(spe_gp, spe_sigma, self._occ_init)
+                try:
+                    spe_gp, spe_sigma = compute_init(
+                        self.hist, self.bins, peak_idx=0, **peak_kwargs
+                    )
+                    print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
+                    self._replace_spe_params(spe_gp, spe_sigma, self._occ_init)
+                    self._replace_spe_bounds(spe_gp, spe_sigma, self._occ_init)
+                except:
+                    print(f"[WARNING] Cannot find SPE peak.")
             if threshold is not None:
                 # TODO: is bins[1] good enough to be the initial value?
                 # TODO: is bin_width good enought to be the initial value?
@@ -477,7 +482,11 @@ class PMT_Fitter:
                 args[self._start_idx :]
             ):
                 y, z = self._estimate_count(args)
-                return self.zero * np.log(z) + np.sum(self.hist * np.log(y)) - self._C
+                log_l = self.zero * np.log(z) + np.sum(self.hist * np.log(y)) - self._C
+                # temporary fix for NaN log likelihood
+                if np.isnan(log_l):
+                    return -np.inf
+                return log_l
             else:
                 return -np.inf
         except ValueError as e:
@@ -523,6 +532,7 @@ class PMT_Fitter:
         step_length: list | np.ndarray = None,
         conv_factor: float = 20,
         conv_change: float = 0.02,
+        processes: int = 8,
     ):
         """MCMC fit using `emcee`.
 
@@ -544,6 +554,8 @@ class PMT_Fitter:
             Convergence factor, N > conv_factor * τ.
         conv_change : float
             Change of τ to trigger convergence, τ change < conv_change.
+        processes : int
+            You might want use Pool() to accelerate the fitting.
 
         Notes
         -----
@@ -560,33 +572,36 @@ class PMT_Fitter:
             (emcee.moves.DESnookerMove(), 0.2),
         ]
 
-        sampler = emcee.EnsembleSampler(
-            nwalkers,
-            ndim,
-            self.log_l,
-            moves=moves,
-        )
+        with Pool(processes=processes) as pool:
+            sampler = emcee.EnsembleSampler(
+                nwalkers,
+                ndim,
+                self.log_l,
+                moves=moves,
+            )
 
-        old_tau, state = np.inf, None
-        for stage in range(max_stages):
-            state = sampler.run_mcmc(state or p0, stage_steps, progress=True)
+            old_tau, state = np.inf, None
+            for stage in range(max_stages):
+                state = sampler.run_mcmc(state or p0, stage_steps, progress=True)
 
-            # get autocorrelation time
-            try:
-                tau = sampler.get_autocorr_time(tol=0)
-            except emcee.autocorr.AutocorrError:
-                # the chain is too short
-                continue
+                # get autocorrelation time
+                try:
+                    tau = sampler.get_autocorr_time(tol=0)
+                except emcee.autocorr.AutocorrError:
+                    # the chain is too short
+                    continue
 
-            print(rf"[Stage {stage+1}] τ ≈ {tau.max():.1f}  (mean {tau.mean():.1f})")
+                print(
+                    rf"[Stage {stage+1}] τ ≈ {tau.max():.1f}  (mean {tau.mean():.1f})"
+                )
 
-            converged = np.all(tau * conv_factor < sampler.iteration)
-            converged &= np.all(np.abs(old_tau - tau) / tau < conv_change)
-            old_tau = tau
+                converged = np.all(tau * conv_factor < sampler.iteration)
+                converged &= np.all(np.abs(old_tau - tau) / tau < conv_change)
+                old_tau = tau
 
-            if converged:
-                print(">>> Converged!")
-                break
+                if converged:
+                    print(">>> Converged!")
+                    break
 
         burn_in = int(5 * old_tau.max())
 
