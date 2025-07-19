@@ -1,8 +1,4 @@
-import emcee
 import numpy as np
-import ROOT
-
-# from ctypes import c_double
 from scipy.fft import fft
 from scipy.stats import norm
 
@@ -18,8 +14,6 @@ from .utils import (
     mighell_chi2,
 )
 from .fft_utils import fft_and_ifft, roll_and_pad
-
-from multiprocessing import Pool
 
 
 class PMT_Fitter:
@@ -153,11 +147,11 @@ class PMT_Fitter:
                 ped_gp, ped_sigma = compute_init(
                     self.hist, self.bins, peak_idx=0, **peak_kwargs
                 )
-                print(f"[FIND PEAK] ped: {ped_gp} ± {ped_sigma}")
+                print(f"[FIND PEAK] ped: {ped_gp} ± {ped_sigma}", flush=True)
                 spe_gp, spe_sigma = compute_init(
                     self.hist, self.bins, peak_idx=1, **peak_kwargs
                 )
-                print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
+                print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}", flush=True)
                 self._replace_spe_params(spe_gp, spe_sigma, self._occ_init)
                 self._replace_spe_bounds(spe_gp, spe_sigma, self._occ_init)
                 self.init = np.array([ped_gp, ped_sigma, *self._init, self._occ_init])
@@ -180,11 +174,11 @@ class PMT_Fitter:
                     spe_gp, spe_sigma = compute_init(
                         self.hist, self.bins, peak_idx=0, **peak_kwargs
                     )
-                    print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}")
+                    print(f"[FIND PEAK] spe: {spe_gp} ± {spe_sigma}", flush=True)
                     self._replace_spe_params(spe_gp, spe_sigma, self._occ_init)
                     self._replace_spe_bounds(spe_gp, spe_sigma, self._occ_init)
                 except:
-                    print(f"[WARNING] Cannot find SPE peak.")
+                    print(f"[WARNING] Cannot find SPE peak.", flush=True)
             if threshold is not None:
                 # TODO: is bins[1] good enough to be the initial value?
                 # TODO: is bin_width good enought to be the initial value?
@@ -223,7 +217,8 @@ class PMT_Fitter:
 
         for i, b in zip(self.init, self.bounds):
             print(
-                f"[INIT] init {i} with boundary {tuple(float(x) if x is not None else None for x in b)}"
+                f"[INIT] init {i} with boundary {tuple(float(x) if x is not None else None for x in b)}",
+                flush=True,
             )
 
     # -------------------------
@@ -495,7 +490,8 @@ class PMT_Fitter:
         except ValueError as e:
             if self.seterr != "ignore":
                 print(
-                    "[WARNING] Some chain(s) have Inf/NaN PDF value(s). Please improve the PDF robustness of your model."
+                    "[WARNING] Some chain(s) have Inf/NaN PDF value(s). Please improve the PDF robustness of your model.",
+                    flush=True,
                 )
             return -np.inf
 
@@ -563,6 +559,9 @@ class PMT_Fitter:
         -----
         `nwalkers >= 2 * ndim`, credits to Xuewei.
         """
+        import emcee
+        from multiprocessing import Pool
+
         if seed is not None:
             np.random.seed(seed)
         rng = np.random.default_rng(42) if seed is None else np.random.default_rng(seed)
@@ -594,7 +593,8 @@ class PMT_Fitter:
                     continue
 
                 print(
-                    rf"[Stage {stage+1}] τ ≈ {tau.max():.1f}  (mean {tau.mean():.1f})"
+                    rf"[Stage {stage+1}] τ ≈ {tau.max():.1f}  (mean {tau.mean():.1f})",
+                    flush=True,
                 )
 
                 converged = np.all(tau * conv_factor < sampler.iteration)
@@ -602,12 +602,12 @@ class PMT_Fitter:
                 old_tau = tau
 
                 if converged:
-                    print(">>> Converged!")
+                    print(">>> Converged!", flush=True)
                     break
 
         burn_in = int(5 * old_tau.max())
 
-        print(f"[burn] steps: {burn_in}")
+        print(f"[burn] steps: {burn_in}", flush=True)
 
         # (n_step, n_walker, n_param)
         self.samples_track = sampler.get_chain(discard=burn_in, thin=track, flat=False)
@@ -628,13 +628,17 @@ class PMT_Fitter:
             tau_final = np.full(ndim, np.nan)
 
         print(
-            rf"[INFO] τ final (max / mean): {np.nanmax(tau_final):.1f} / {np.nanmean(tau_final):.1f}"
+            rf"[INFO] τ final (max / mean): {np.nanmax(tau_final):.1f} / {np.nanmean(tau_final):.1f}",
+            flush=True,
         )
 
         N_tot = flat_chain.shape[0]  # total retained draws
         ess = N_tot / tau_final  # effective sample size
         # args_complete_std *= np.sqrt(tau_final)  # per-parameter MC error
-        print(f"[INFO] ESS (min/max): {np.nanmin(ess):.0f} / {np.nanmax(ess):.0f}")
+        print(
+            f"[INFO] ESS (min/max): {np.nanmin(ess):.0f} / {np.nanmax(ess):.0f}",
+            flush=True,
+        )
 
         sampler.reset()
 
@@ -666,13 +670,16 @@ class PMT_Fitter:
             gain="gm",
         )
 
-        # print(f"Mean autocorrelation time: {autocorr_time} steps")
-        print(f"[INFO] Current burn-in: {burn_in} steps")
-        print(f"[INFO] Mean acceptance fraction: {np.mean(acceptance):.3f}")
+        print(f"[INFO] Current burn-in: {burn_in} steps", flush=True)
+        print(f"[INFO] Mean acceptance fraction: {np.mean(acceptance):.3f}", flush=True)
         print(
-            f"[INFO] Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}"
+            f"[INFO] Acceptance percentile: {np.percentile(acceptance, [25, 50, 75])}",
+            flush=True,
         )
-        print(f"[INFO] Init params: " + ", ".join([f"{e:.4g}" for e in self.init]))
+        print(
+            f"[INFO] Init params: " + ", ".join([f"{e:.4g}" for e in self.init]),
+            flush=True,
+        )
 
         additional_args_stream = (
             "Pedestal params: "
@@ -687,7 +694,8 @@ class PMT_Fitter:
                     f"{e:.4g} pm {f:.4g}"
                     for e, f in zip(self.additional_args, self.additional_args_std)
                 ]
-            )
+            ),
+            flush=True,
         )
 
         print(
@@ -697,10 +705,12 @@ class PMT_Fitter:
                     f"{e:.4g} pm {f:.4g}"
                     for e, f in zip(self.ser_args, self.ser_args_std)
                 ]
-            )
+            ),
+            flush=True,
         )
         print(
-            "[INFO] Occupancy: " + ", ".join([f"{self.occ:.4g} pm {self.occ_std:.4g}"])
+            "[INFO] Occupancy: " + ", ".join([f"{self.occ:.4g} pm {self.occ_std:.4g}"]),
+            flush=True,
         )
 
         self.likelihood = self.log_l(args_complete)
@@ -719,7 +729,7 @@ class PMT_Fitter:
         self.smooth = self._estimate_smooth(args_complete)
         self.ys, self.zs = self._estimate_count(args_complete)
 
-    def _fit_minuit(self, *, strategy=1, tol=1e-01, max_calls=10000, print_level=1):
+    def _fit_minuit(self, *, strategy=1, tol=1e-01, max_calls=10000, print_level=0):
         """Fit with Minuit.
 
         Parameters
@@ -733,6 +743,9 @@ class PMT_Fitter:
         print_level : int
             Print level of Minuit.
         """
+        import ROOT
+
+        ROOT.gErrorIgnoreLevel = ROOT.kError
 
         # consistent nll wrapper for log likelihood function
         def _nll_wrap(par_ptr):
@@ -741,43 +754,60 @@ class PMT_Fitter:
             ll = self.log_l(args)
             return 1e30 if not np.isfinite(ll) else -ll
 
+        # init a Minuit minimizer
+        def _configure_minimizer(m, strategy, tol, max_calls, print_level):
+            m.SetFunction(self._fcn)
+            m.SetStrategy(strategy)
+            m.SetErrorDef(0.5)
+            m.SetTolerance(tol)
+            m.SetMaxFunctionCalls(max_calls)
+            m.SetPrintLevel(print_level)
+
+            for i, (v0, lim) in enumerate(zip(self.init, self.bounds)):
+                step = 0.1 * (abs(v0) if v0 else 1.0)
+                lo, hi = lim
+                name = f"p{i}"
+                if lo is None and hi is None:
+                    m.SetVariable(i, name, float(v0), step)
+                elif lo is not None and hi is not None:
+                    m.SetLimitedVariable(i, name, float(v0), step, float(lo), float(hi))
+                elif lo is not None:
+                    m.SetLowerLimitedVariable(i, name, float(v0), step, float(lo))
+                else:
+                    m.SetUpperLimitedVariable(i, name, float(v0), step, float(hi))
+
         # this is to prevent GC clear _nll_wrap
         self._nll_wrap = _nll_wrap
 
         self._fcn = ROOT.Math.Functor(self._nll_wrap, self.dof)
-        m = ROOT.Math.Factory.CreateMinimizer("Minuit2", "Migrad")
-        m.SetFunction(self._fcn)
-        m.SetStrategy(strategy)
-        m.SetErrorDef(0.5)
-        m.SetTolerance(tol)
-        m.SetMaxFunctionCalls(max_calls)
-        m.SetPrintLevel(print_level)
 
-        # give initial value and box constraints
-        for i, (v0, lim) in enumerate(zip(self.init, self.bounds)):
-            step = 0.1 * (abs(v0) if v0 else 1.0)
-            lo, hi = lim
-            name = f"p{i}"
-            if lo is None and hi is None:
-                m.SetVariable(i, name, float(v0), step)
-            elif lo is not None and hi is not None:
-                m.SetLimitedVariable(i, name, float(v0), step, float(lo), float(hi))
-            elif lo is not None:
-                m.SetLowerLimitedVariable(i, name, float(v0), step, float(lo))
-            else:
-                m.SetUpperLimitedVariable(i, name, float(v0), step, float(hi))
+        failCnt = 0
 
-        ok = m.Minimize()
-        if not ok:
-            if strategy != 2:
-                m.SetStrategy(strategy=2)
-                ok = m.Minimize()
-                if not ok:
-                    print(
-                        "[WARN] Minuit did not converge (EDM>tol or max_calls reached)."
-                    )
+        while True:
+            algo = ["Migrad", "Combined", "Migrad", "Combined", "Migrad", "Combined"][
+                failCnt
+            ]
+            if failCnt < 2:
+                this_tol = tol
+            elif failCnt < 4:
+                this_tol = max(10 * tol, 1.0)
             else:
-                print("[WARN] Minuit did not converge (EDM>tol or max_calls reached).")
+                this_tol = max(50 * tol, 5.0)
+            m = ROOT.Math.Factory.CreateMinimizer("Minuit2", algo)
+            _configure_minimizer(m, strategy, this_tol, max_calls, print_level)
+
+            ok = m.Minimize()
+            if ok:
+                break
+            else:
+                print(
+                    "[WARN] Minuit did not converge (EDM>tol or max_calls reached).",
+                    flush=True,
+                )
+                failCnt += 1
+                if failCnt >= 6:
+                    raise Exception("Minuit failed all attempts.")
+
         m.Hesse()
 
         args_complete = np.array([m.X()[i] for i in range(self.dof)])
@@ -791,6 +821,43 @@ class PMT_Fitter:
 
         self.gps = self.get_gain(self.ser_args, "gp")
         self.gms = self.get_gain(self.ser_args, "gm")
+
+        print(
+            f"[INFO] Init params: " + ", ".join([f"{e:.4g}" for e in self.init]),
+            flush=True,
+        )
+
+        additional_args_stream = (
+            "Pedestal params: "
+            if self._isWholeSpectrum
+            else "Threshold effect params: "
+        )
+        print(
+            "[INFO] "
+            + additional_args_stream
+            + ", ".join(
+                [
+                    f"{e:.4g} pm {f:.4g}"
+                    for e, f in zip(self.additional_args, self.additional_args_std)
+                ]
+            ),
+            flush=True,
+        )
+
+        print(
+            "[INFO] SER params: "
+            + ", ".join(
+                [
+                    f"{e:.4g} pm {f:.4g}"
+                    for e, f in zip(self.ser_args, self.ser_args_std)
+                ]
+            ),
+            flush=True,
+        )
+        print(
+            "[INFO] Occupancy: " + ", ".join([f"{self.occ:.4g} pm {self.occ_std:.4g}"]),
+            flush=True,
+        )
 
         self.likelihood = -m.MinValue()
         self.chi_sq_pearson, self.ndf_merged = self.get_chi_sq(
