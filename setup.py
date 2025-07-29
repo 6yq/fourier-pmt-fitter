@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="pmt-fitter",
-    version="1.1.0",
+    version="1.1.1",
     description="A PMT charge spectrum fitter using FFT-based convolution",
     author="Yiqi Liu",
     author_email="liuyiqi24@mails.tsinghua.edu.cn",
