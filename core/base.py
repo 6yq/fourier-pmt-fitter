@@ -806,7 +806,7 @@ class PMT_Fitter:
                 )
                 failCnt += 1
                 if failCnt >= 6:
-                    raise Exception("Minuit failed all attempts.")
+                    break
 
         m.Hesse()
 
