@@ -104,6 +104,9 @@ class PMT_Fitter:
         else:
             self._start_idx = 0
 
+        # if the PDF should be handled with FFT
+        self.use_analytic_ft = False
+
         # -------------------------
         #   Derived Attributes
         # -------------------------
@@ -243,7 +246,6 @@ class PMT_Fitter:
             return lambda x: np.ones_like(x)
 
     def _produce_all_PE_processor(self):
-        # TODO: correct proportions if SPE contains delta component
         if self._isWholeSpectrum:
             return (
                 lambda occupancy, b_sp: lambda s_sp: np.exp(
@@ -252,9 +254,6 @@ class PMT_Fitter:
                 * b_sp
             )
         else:
-            # return lambda occupancy, b_sp: lambda s_sp: np.exp(
-            #     -np.log(1 - occupancy) * (s_sp - 1)
-            # )
             return lambda occupancy, b_sp: lambda s_sp: (1 - occupancy) * (
                 np.exp(-np.log(1 - occupancy) * s_sp) - 1
             )

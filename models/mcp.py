@@ -1,8 +1,10 @@
 import numpy as np
 from scipy.stats import gamma
+from scipy.fft import fft, ifft
+
 from ..core.base import PMT_Fitter
 from ..core.utils import compute_init
-from .tweedie_pdf import tweedie_reckon
+from ..core.fft_utils import roll_and_pad
 
 
 class MCP_Fitter(PMT_Fitter):
@@ -52,54 +54,141 @@ class MCP_Fitter(PMT_Fitter):
 
     def _map_args(self, args):
         frac, mean, sigma, lam, mean_t, sigma_t = args
-        alpha_ts = (mean_t**2) / (sigma_t**2)
-        beta_ts = mean_t / (sigma_t**2)
         k = (mean / sigma) ** 2
         theta = mean / k
-        mu = lam * alpha_ts * mean / beta_ts
-        p = 1 + 1 / (alpha_ts + 1)
-        phi = (alpha_ts + 1) * pow(lam * alpha_ts, 1 - p) / pow(beta_ts / mean, 2 - p)
-        return (frac, k, theta, mu, p, phi)
+        k_ts = (mean_t / sigma_t) ** 2
+        theta_ts = mean * (sigma_t**2) / mean_t
+        return (frac, k, theta, lam, k_ts, theta_ts)
 
-    def _pdf_gm(self, x, frac, k, theta):
-        return frac * gamma.pdf(x, a=k, scale=theta)
-
-    def _pdf_tw(self, x, frac, mu, p, phi):
-        pdf = np.zeros_like(x)
-        lamb = mu ** (2 - p) / ((2 - p) * phi)
-        # If unfortunately the sample point is too small,
-        # there would be exponential explosion,
-        # so we set a small eps to avoid this.
-        eps = 1e-03
-        pdf[x > eps] = (
-            (1 - frac)
-            * tweedie_reckon(x[x > eps], p=p, mu=mu, phi=phi, dlambda=False)[0]
-            / (1 - np.exp(-lamb))
+    def _pdf_gm(self, frac, k, theta, occ):
+        n_full = len(self.xsp)
+        # omega_j
+        freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
+        ft_gamma_g = self._ft_gamma(freq, k, theta)
+        ft_padded, shift_padded, recover_slice = roll_and_pad(
+            ft_gamma_g, self._shift, self._pad_safe
         )
-        return pdf
+        fft_pdf = ft_padded * self._xsp_width
+        fft_processed = self._nPE_processor(occ, 1)(fft_pdf)
+        ifft_pdf = np.roll(
+            np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
+        )
+        return frac * ifft_pdf[recover_slice]
+
+    def _pdf_tw(self, frac, lam, k_ts, theta_ts, occ, const):
+        n_full = len(self.xsp)
+        # omega_j
+        freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
+        ft_gamma_ts = self._ft_gamma(freq, k_ts, theta_ts)
+        ft_tweedie_nz = np.exp(-lam) * (np.exp(lam * ft_gamma_ts) - 1)
+
+        denom = 1 - np.exp(-lam)
+        ft_cont = 1 / denom * ft_tweedie_nz
+
+        ft_padded, shift_padded, recover_slice = roll_and_pad(
+            ft_cont, self._shift, self._pad_safe
+        )
+        fft_pdf = (1 - const) * ft_padded * self._xsp_width + const
+        fft_processed = self._nPE_processor(occ, 1)(fft_pdf)
+        ifft_pdf = np.roll(
+            np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
+        )
+        return (1 - frac) * ifft_pdf[recover_slice]
+
+        # pdf = np.zeros_like(x)
+        # lamb = mu ** (2 - p) / ((2 - p) * phi)
+        # # If unfortunately the sample point is too small,
+        # # there would be exponential explosion,
+        # # so we set a small eps to avoid this.
+        # eps = 1e-03
+        # pdf[x > eps] = (
+        #     (1 - frac)
+        #     * tweedie_reckon(x[x > eps], p=p, mu=mu, phi=phi, dlambda=False)[0]
+        #     / (1 - np.exp(-lamb))
+        # )
+        # return pdf
+
+    def _ft_gamma(self, freq, k, theta):
+        """Wow, Gamma FFT is analytic!
+
+        Parameters
+        ----------
+        freq : ndarray
+        k : float
+        theta : float
+        """
+        return (1 + 1j * theta * freq) ** (-k)
+
+    def _pdf_sr(self, args):
+        frac, k, theta, lam, k_ts, theta_ts = self._map_args(args[self._start_idx : -1])
+
+        const = self.const(args[self._start_idx : -1])
+        n_full = len(self.xsp)
+        # omega_j
+        freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
+        ft_gamma_g = self._ft_gamma(freq, k, theta)
+        ft_gamma_ts = self._ft_gamma(freq, k_ts, theta_ts)
+        ft_tweedie_nz = np.exp(-lam) * (np.exp(lam * ft_gamma_ts) - 1)
+
+        denom = 1 - np.exp(-lam)
+        ft_cont = frac * ft_gamma_g + (1 - frac) / denom * ft_tweedie_nz
+        ft_padded, shift_padded, recover_slice = roll_and_pad(
+            ft_cont, self._shift, self._pad_safe
+        )
+        fft_pdf = (1 - const) * ft_padded * self._xsp_width + const
+
+        b_sp = self._b_sp(args)
+        pass_threshold = self._efficiency(self.xsp, *args[: self._start_idx])
+        fft_processed = self._all_PE_processor(args[-1], b_sp)(fft_pdf)
+        ifft_pdf = np.roll(
+            np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
+        )[recover_slice]
+        return pass_threshold * ifft_pdf
+
+    def _pdf_sr_n(self, args, n):
+        if n == 0:
+            return self._pdf_ped(args[: self._start_idx])
+        else:
+            frac, k, theta, lam, k_ts, theta_ts = self._map_args(
+                args[self._start_idx : -1]
+            )
+
+            const = self.const(args[self._start_idx : -1])
+            n_full = len(self.xsp)
+            # omega_j
+            freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
+            ft_gamma_g = self._ft_gamma(freq, k, theta)
+            ft_gamma_ts = self._ft_gamma(freq, k_ts, theta_ts)
+            ft_tweedie_nz = np.exp(-lam) * (np.exp(lam * ft_gamma_ts) - 1)
+
+            denom = 1 - np.exp(-lam)
+            ft_cont = frac * ft_gamma_g + (1 - frac) / denom * ft_tweedie_nz
+            ft_padded, shift_padded, recover_slice = roll_and_pad(
+                ft_cont, self._shift, self._pad_safe
+            )
+            fft_pdf = (1 - const) * ft_padded * self._xsp_width + const
+            fft_processed = self._nPE_processor(args[-1], n)(fft_pdf)
+            ifft_pdf = np.roll(
+                np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
+            )
+            return ifft_pdf[recover_slice]
 
     def Gms(self, args, occ):
         frac, mean, sigma = args[:3]
         k = (mean / sigma) ** 2
         theta = mean / k
         mu_l = -np.log(1 - occ)
-        return (
-            self.A
-            * mu_l
-            * np.exp(-mu_l)
-            * self._bin_width
-            * self._pdf_gm(self.xsp, frac, k, theta)
-        )
+        return self.A * self._bin_width * self._pdf_gm(frac, k, theta, occ)
 
     def Tws(self, args, occ):
-        frac, _, _, mu, p, phi = self._map_args(args)
+        frac, _, _, lam, k_ts, theta_ts = self._map_args(args)
         mu_l = -np.log(1 - occ)
         return (
             self.A
             * mu_l
             * np.exp(-mu_l)
             * self._bin_width
-            * self._pdf_tw(self.xsp, frac, mu, p, phi)
+            * self._pdf_tw(frac, lam, k_ts, theta_ts, occ, self.const(args))
         )
 
     def get_gain(self, args, gain: str = "gm"):
