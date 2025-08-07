@@ -61,22 +61,19 @@ class MCP_Fitter(PMT_Fitter):
         return (frac, k, theta, lam, k_ts, theta_ts)
 
     def _pdf_gm(self, frac, k, theta, occ):
-        n_full = len(self.xsp)
+        n_full = len(self.xsp) + self._pad_safe
         # omega_j
         freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
-        ft_gamma_g = self._ft_gamma(freq, k, theta)
-        ft_padded, shift_padded, recover_slice = roll_and_pad(
-            ft_gamma_g, self._shift, self._pad_safe
-        )
-        fft_pdf = ft_padded * self._xsp_width
+        fft_pdf = self._ft_gamma(freq, k, theta)
         fft_processed = self._nPE_processor(occ, 1)(fft_pdf)
+        shift_padded = 2 * self._shift if self._shift < 0 else 0
         ifft_pdf = np.roll(
             np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
-        )
-        return frac * ifft_pdf[recover_slice]
+        )[: len(self.xsp)]
+        return frac * ifft_pdf
 
     def _pdf_tw(self, frac, lam, k_ts, theta_ts, occ, const):
-        n_full = len(self.xsp)
+        n_full = len(self.xsp) + self._pad_safe
         # omega_j
         freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
         ft_gamma_ts = self._ft_gamma(freq, k_ts, theta_ts)
@@ -85,28 +82,13 @@ class MCP_Fitter(PMT_Fitter):
         denom = 1 - np.exp(-lam)
         ft_cont = 1 / denom * ft_tweedie_nz
 
-        ft_padded, shift_padded, recover_slice = roll_and_pad(
-            ft_cont, self._shift, self._pad_safe
-        )
-        fft_pdf = (1 - const) * ft_padded * self._xsp_width + const
+        fft_pdf = (1 - const) * ft_cont + const
         fft_processed = self._nPE_processor(occ, 1)(fft_pdf)
+        shift_padded = 2 * self._shift if self._shift < 0 else 0
         ifft_pdf = np.roll(
             np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
-        )
-        return (1 - frac) * ifft_pdf[recover_slice]
-
-        # pdf = np.zeros_like(x)
-        # lamb = mu ** (2 - p) / ((2 - p) * phi)
-        # # If unfortunately the sample point is too small,
-        # # there would be exponential explosion,
-        # # so we set a small eps to avoid this.
-        # eps = 1e-03
-        # pdf[x > eps] = (
-        #     (1 - frac)
-        #     * tweedie_reckon(x[x > eps], p=p, mu=mu, phi=phi, dlambda=False)[0]
-        #     / (1 - np.exp(-lamb))
-        # )
-        # return pdf
+        )[: len(self.xsp)]
+        return (1 - frac) * ifft_pdf
 
     def _ft_gamma(self, freq, k, theta):
         """Wow, Gamma FFT is analytic!
@@ -123,7 +105,7 @@ class MCP_Fitter(PMT_Fitter):
         frac, k, theta, lam, k_ts, theta_ts = self._map_args(args[self._start_idx : -1])
 
         const = self.const(args[self._start_idx : -1])
-        n_full = len(self.xsp)
+        n_full = len(self.xsp) + self._pad_safe
         # omega_j
         freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
         ft_gamma_g = self._ft_gamma(freq, k, theta)
@@ -132,17 +114,16 @@ class MCP_Fitter(PMT_Fitter):
 
         denom = 1 - np.exp(-lam)
         ft_cont = frac * ft_gamma_g + (1 - frac) / denom * ft_tweedie_nz
-        ft_padded, shift_padded, recover_slice = roll_and_pad(
-            ft_cont, self._shift, self._pad_safe
-        )
-        fft_pdf = (1 - const) * ft_padded * self._xsp_width + const
+        fft_pdf = (1 - const) * ft_cont + const
+        shift_padded = 2 * self._shift if self._shift < 0 else 0
 
         b_sp = self._b_sp(args)
         pass_threshold = self._efficiency(self.xsp, *args[: self._start_idx])
-        fft_processed = self._all_PE_processor(args[-1], b_sp)(fft_pdf)
+        # fft_processed = self._all_PE_processor(args[-1], b_sp)(fft_pdf)
+        fft_processed = self._nPE_processor(args[-1], 2)(fft_pdf)
         ifft_pdf = np.roll(
             np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
-        )[recover_slice]
+        )[: len(self.xsp)]
         return pass_threshold * ifft_pdf
 
     def _pdf_sr_n(self, args, n):
@@ -154,7 +135,7 @@ class MCP_Fitter(PMT_Fitter):
             )
 
             const = self.const(args[self._start_idx : -1])
-            n_full = len(self.xsp)
+            n_full = len(self.xsp) + self._pad_safe
             # omega_j
             freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
             ft_gamma_g = self._ft_gamma(freq, k, theta)
@@ -163,15 +144,16 @@ class MCP_Fitter(PMT_Fitter):
 
             denom = 1 - np.exp(-lam)
             ft_cont = frac * ft_gamma_g + (1 - frac) / denom * ft_tweedie_nz
-            ft_padded, shift_padded, recover_slice = roll_and_pad(
-                ft_cont, self._shift, self._pad_safe
-            )
-            fft_pdf = (1 - const) * ft_padded * self._xsp_width + const
+            fft_pdf = (1 - const) * ft_cont + const
             fft_processed = self._nPE_processor(args[-1], n)(fft_pdf)
+            shift_padded = 2 * self._shift if self._shift < 0 else 0
             ifft_pdf = np.roll(
                 np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
-            )
-            return ifft_pdf[recover_slice]
+            )[: len(self.xsp)]
+            return ifft_pdf
+
+    def _produce_pdf_sr_n(self):
+        return self._pdf_sr_n
 
     def Gms(self, args, occ):
         frac, mean, sigma = args[:3]
@@ -204,11 +186,11 @@ class MCP_Fitter(PMT_Fitter):
         else:
             raise NameError(f"{gain} is not a legal gain type")
 
-    def _pdf(self, args):
-        frac, k, theta, mu, p, phi = self._map_args(args)
-        return self._pdf_gm(self.xsp, frac, k, theta) + self._pdf_tw(
-            self.xsp, frac, mu, p, phi
-        )
+    # def _pdf(self, args):
+    #     frac, k, theta, mu, p, phi = self._map_args(args)
+    #     return self._pdf_gm(self.xsp, frac, k, theta) + self._pdf_tw(
+    #         self.xsp, frac, mu, p, phi
+    #     )
 
     def _zero(self, args):
         frac, _, _, lam, _, _, occ = args
