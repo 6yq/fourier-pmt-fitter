@@ -215,8 +215,8 @@ class PMT_Fitter:
         self.dof = len(self.init)
         self.bounds.append(
             (
-                0.8 * self._occ_init,
-                min(1.2 * self._occ_init, 1.0),
+                0.0,
+                1.0,
             )
         )
         self.bounds = tuple(self.bounds)
