@@ -1,6 +1,5 @@
 import numpy as np
 from scipy.stats import gamma
-from scipy.fft import fft, ifft
 
 from ..core.base import PMT_Fitter
 from ..core.utils import compute_init
@@ -60,36 +59,6 @@ class MCP_Fitter(PMT_Fitter):
         theta_ts = mean * (sigma_t**2) / mean_t
         return (frac, k, theta, lam, k_ts, theta_ts)
 
-    def _pdf_gm(self, frac, k, theta, occ):
-        n_full = len(self.xsp) + self._pad_safe
-        # omega_j
-        freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
-        fft_pdf = self._ft_gamma(freq, k, theta)
-        fft_processed = self._nPE_processor(occ, 1)(fft_pdf)
-        shift_padded = 2 * self._shift if self._shift < 0 else 0
-        ifft_pdf = np.roll(
-            np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
-        )[: len(self.xsp)]
-        return frac * ifft_pdf
-
-    def _pdf_tw(self, frac, lam, k_ts, theta_ts, occ, const):
-        n_full = len(self.xsp) + self._pad_safe
-        # omega_j
-        freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
-        ft_gamma_ts = self._ft_gamma(freq, k_ts, theta_ts)
-        ft_tweedie_nz = np.exp(-lam) * (np.exp(lam * ft_gamma_ts) - 1)
-
-        denom = 1 - np.exp(-lam)
-        ft_cont = 1 / denom * ft_tweedie_nz
-
-        fft_pdf = (1 - const) * ft_cont + const
-        fft_processed = self._nPE_processor(occ, 1)(fft_pdf)
-        shift_padded = 2 * self._shift if self._shift < 0 else 0
-        ifft_pdf = np.roll(
-            np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
-        )[: len(self.xsp)]
-        return (1 - frac) * ifft_pdf
-
     def _ft_gamma(self, freq, k, theta):
         """Wow, Gamma FFT is analytic!
 
@@ -101,77 +70,37 @@ class MCP_Fitter(PMT_Fitter):
         """
         return (1 + 1j * theta * freq) ** (-k)
 
-    def _pdf_sr(self, args):
-        frac, k, theta, lam, k_ts, theta_ts = self._map_args(args[self._start_idx : -1])
-
-        const = self.const(args[self._start_idx : -1])
-        n_full = len(self.xsp) + self._pad_safe
-        # omega_j
-        freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
-        ft_gamma_g = self._ft_gamma(freq, k, theta)
-        ft_gamma_ts = self._ft_gamma(freq, k_ts, theta_ts)
-        ft_tweedie_nz = np.exp(-lam) * (np.exp(lam * ft_gamma_ts) - 1)
-
-        denom = 1 - np.exp(-lam)
-        ft_cont = frac * ft_gamma_g + (1 - frac) / denom * ft_tweedie_nz
-        fft_pdf = (1 - const) * ft_cont + const
-        shift_padded = 2 * self._shift if self._shift < 0 else 0
-
-        b_sp = self._b_sp(args)
-        pass_threshold = self._efficiency(self.xsp, *args[: self._start_idx])
-        # fft_processed = self._all_PE_processor(args[-1], b_sp)(fft_pdf)
-        fft_processed = self._nPE_processor(args[-1], 2)(fft_pdf)
-        ifft_pdf = np.roll(
-            np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
-        )[: len(self.xsp)]
-        return pass_threshold * ifft_pdf
-
-    def _pdf_sr_n(self, args, n):
-        if n == 0:
-            return self._pdf_ped(args[: self._start_idx])
-        else:
-            frac, k, theta, lam, k_ts, theta_ts = self._map_args(
-                args[self._start_idx : -1]
-            )
-
-            const = self.const(args[self._start_idx : -1])
-            n_full = len(self.xsp) + self._pad_safe
-            # omega_j
-            freq = 2 * np.pi * np.fft.fftfreq(n_full, d=self._xsp_width)
-            ft_gamma_g = self._ft_gamma(freq, k, theta)
-            ft_gamma_ts = self._ft_gamma(freq, k_ts, theta_ts)
-            ft_tweedie_nz = np.exp(-lam) * (np.exp(lam * ft_gamma_ts) - 1)
-
-            denom = 1 - np.exp(-lam)
-            ft_cont = frac * ft_gamma_g + (1 - frac) / denom * ft_tweedie_nz
-            fft_pdf = (1 - const) * ft_cont + const
-            fft_processed = self._nPE_processor(args[-1], n)(fft_pdf)
-            shift_padded = 2 * self._shift if self._shift < 0 else 0
-            ifft_pdf = np.roll(
-                np.real(ifft(fft_processed)) / self._xsp_width, -shift_padded
-            )[: len(self.xsp)]
-            return ifft_pdf
-
-    def _produce_pdf_sr_n(self):
-        return self._pdf_sr_n
+    def _ser_ft(self, freq, ser_args):
+        frac, k, theta, lam, k_ts, theta_ts = self._map_args(ser_args)
+        ft_g = self._ft_gamma(freq, k, theta)
+        ft_ts0 = self._ft_gamma(freq, k_ts, theta_ts)
+        ft_tw = np.exp(-lam) * (np.exp(lam * ft_ts0) - 1) / (1 - np.exp(-lam))
+        return frac * ft_g + (1 - frac) * ft_tw
 
     def Gms(self, args, occ):
         frac, mean, sigma = args[:3]
         k = (mean / sigma) ** 2
         theta = mean / k
-        mu_l = -np.log(1 - occ)
         return self.A * self._bin_width * self._pdf_gm(frac, k, theta, occ)
+
+    def _pdf_gm(self, frac, k, theta, occ):
+        fft_input = self._ft_gamma(self._freq, k, theta)
+        s_sp = self._nPE_processor(occ, 1)(fft_input)
+        ifft_pdf = self._ifft_pipeline(s_sp)
+        return frac * ifft_pdf
 
     def Tws(self, args, occ):
         frac, _, _, lam, k_ts, theta_ts = self._map_args(args)
-        mu_l = -np.log(1 - occ)
-        return (
-            self.A
-            * mu_l
-            * np.exp(-mu_l)
-            * self._bin_width
-            * self._pdf_tw(frac, lam, k_ts, theta_ts, occ, self.const(args))
-        )
+        return self.A * self._bin_width * self._pdf_tw(frac, lam, k_ts, theta_ts, occ)
+
+    def _pdf_tw(self, frac, lam, k_ts, theta_ts, occ):
+        const = np.exp(-lam)
+        ft_ts0 = self._ft_gamma(self._freq, k_ts, theta_ts)
+        ft_tw_nz = np.exp(-lam) * (np.exp(lam * ft_ts0) - 1) / (1 - np.exp(-lam))
+        fft_input = (1 - const) * ft_tw_nz + const
+        s_sp = self._nPE_processor(occ, 1)(fft_input)
+        ifft_pdf = self._ifft_pipeline(s_sp)
+        return (1 - frac) * ifft_pdf
 
     def get_gain(self, args, gain: str = "gm"):
         if gain == "gp":
@@ -185,12 +114,6 @@ class MCP_Fitter(PMT_Fitter):
             return fracReNorm * mean + (1 - fracReNorm) * mean * mean_t * lam
         else:
             raise NameError(f"{gain} is not a legal gain type")
-
-    # def _pdf(self, args):
-    #     frac, k, theta, mu, p, phi = self._map_args(args)
-    #     return self._pdf_gm(self.xsp, frac, k, theta) + self._pdf_tw(
-    #         self.xsp, frac, mu, p, phi
-    #     )
 
     def _zero(self, args):
         frac, _, _, lam, _, _, occ = args
