@@ -48,8 +48,9 @@ class MCP_Fitter(PMT_Fitter):
             **peak_kwargs,
         )
 
-    def const(self, args):
-        return (1 - args[0]) * np.exp(-args[3])
+    def const(self, ser_args):
+        frac, k, theta, lam, k_ts, theta_ts = ser_args
+        return (1 - frac) * np.exp(-lam)
 
     def _map_args(self, args):
         frac, mean, sigma, lam, mean_t, sigma_t = args
