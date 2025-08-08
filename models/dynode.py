@@ -66,7 +66,7 @@ class Dynode_Fitter(PMT_Fitter):
         inv = 1.0 / (np.sqrt(2.0 * np.pi) * sigma_)
         return df * inv * np.exp(-0.5 * ((x - mean_) / sigma_) ** 2)
 
-    def _pdf(self, args):
+    def _ser_pdf_time(self, args):
         df, ds, mean, sigma = args
         return self._pdf_normal(self.xsp, df, mean, sigma) + self._pdf_missing(
             self.xsp, df, ds, mean, sigma
