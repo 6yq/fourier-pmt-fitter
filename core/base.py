@@ -1,6 +1,6 @@
 import numpy as np
-from scipy.fft import fft
 from scipy.stats import norm
+from scipy.fft import fft, ifft
 
 from .utils import (
     composite_simpson,
@@ -13,7 +13,7 @@ from .utils import (
     modified_neyman_chi2_B,
     mighell_chi2,
 )
-from .fft_utils import fft_and_ifft, roll_and_pad
+from .fft_utils import roll_and_pad
 
 
 class PMT_Fitter:
@@ -104,15 +104,11 @@ class PMT_Fitter:
         else:
             self._start_idx = 0
 
-        # if the PDF should be handled with FFT
-        self.use_analytic_ft = False
-
         # -------------------------
         #   Derived Attributes
         # -------------------------
         self._bin_width = self.bins[1] - self.bins[0]
         self._xs = (self.bins[:-1] + self.bins[1:]) / 2
-        self._interval = self._bin_width / self.sample
         self._xsp_width = self._bin_width / self.sample
         self._shift = np.ceil(self.bins[0] / self._xsp_width).astype(int)
 
@@ -127,6 +123,11 @@ class PMT_Fitter:
         self._pad_safe = 2 ** int(np.ceil(np.log2(_n_origin))) - _n_origin
         self._C = self._log_l_C()
 
+        self._n_full = len(self.xsp) + self._pad_safe
+        self._freq = 2 * np.pi * np.fft.fftfreq(self._n_full, d=self._xsp_width)
+        self._shift_padded = 2 * self._shift if self._shift < 0 else 0
+        self._recover_slice = slice(0, len(self.xsp))
+
         # -------------------------
         #     Produce Functions
         # -------------------------
@@ -134,6 +135,8 @@ class PMT_Fitter:
         self._all_PE_processor = self._produce_all_PE_processor()
         self._nPE_processor = self._produce_nPE_processor()
         self._b_sp = self._produce_b_sp()
+        self._ser_to_ft = self._produce_ser_to_ft()
+        self._ifft_pipeline = self._produce_ifft_pipeline()
         self._pdf_sr_n = self._produce_pdf_sr_n()
         self._estimate_count = self._produce_estimate_counter()
         self._constraint_checker = self._produce_constraint_checker()
@@ -280,11 +283,27 @@ class PMT_Fitter:
         else:
             return lambda args: None
 
-    def _produce_zero_pe(self):
-        if self._isWholeSpectrum:
-            return lambda args: self._pdf_ped(args[: self._start_idx])
-        else:
-            return lambda args: np.zeros_like(self.xsp)
+    def _produce_ser_to_ft(self):
+        """Return SER PDF in Fourier domain."""
+
+        def ser_to_ft(ser_args):
+            ft = self._ser_ft(self._freq, ser_args)
+            if ft is not None:
+                return ft
+            pdf = self._ser_pdf_time(ser_args)
+            pdf_padded, _, _ = roll_and_pad(pdf, self._shift, self._pad_safe)
+            return fft(pdf_padded) * self._xsp_width
+
+        return ser_to_ft
+
+    def _produce_ifft_pipeline(self):
+        """Return processed PDF."""
+
+        def ifft_back(s_sp_processed):
+            ifft_full = np.real(ifft(s_sp_processed)) / self._xsp_width
+            return np.roll(ifft_full, -self._shift_padded)[self._recover_slice]
+
+        return ifft_back
 
     def _produce_pdf_sr_n(self):
         """Return n-order pdf.
@@ -301,32 +320,25 @@ class PMT_Fitter:
         -----
         nPE contributes exp(-mu) / k! * [mu * s_sp]^k
         """
-        if self._isWholeSpectrum:
-            return lambda args, n: (
-                self._pdf_ped(args[: self._start_idx])
-                if n == 0
-                else fft_and_ifft(
-                    self._pdf(args[self._start_idx : -1]),
-                    self._shift,
-                    self._xsp_width,
-                    self._pad_safe,
-                    self._nPE_processor(args[-1], n),
-                    self.const(args[self._start_idx : -1]),
+
+        def pdf_sr_n(args, n):
+            if n == 0:
+                return (
+                    self._pdf_ped(args[: self._start_idx])
+                    if self._isWholeSpectrum
+                    else np.zeros_like(self.xsp)
                 )
-            )
-        else:
-            return lambda args, n: (
-                np.zeros_like(self.xsp)
-                if n == 0
-                else fft_and_ifft(
-                    self._pdf(args[self._start_idx : -1]),
-                    self._shift,
-                    self._xsp_width,
-                    self._pad_safe,
-                    self._nPE_processor(args[-1], n),
-                    self.const(args[self._start_idx : -1]),
-                )
-            )
+
+            ser_args = args[self._start_idx : -1]
+            occ = args[-1]
+            const = self.const(ser_args)
+
+            ft_cont = self._ser_to_ft(ser_args)
+            fft_input = (1 - const) * ft_cont + const
+            fft_processed = self._nPE_processor(occ, n)(fft_input)
+            return self._ifft_pipeline(fft_processed)
+
+        return pdf_sr_n
 
     def _produce_estimate_counter(self):
         """Return a function that estimates counts of every bin.
@@ -353,7 +365,7 @@ class PMT_Fitter:
         w = np.ones(self.sample + 1)
         w[1:-1:2] = 4
         w[2:-2:2] = 2
-        w *= self._interval / 3
+        w *= self._xsp_width / 3
         self._simp_w = w
 
         def counter(args):
@@ -398,8 +410,11 @@ class PMT_Fitter:
     def _replace_spe_bounds(self, gp_bound, sigma_bound):
         raise NotImplementedError
 
-    def _pdf(self, args):
+    def _ser_pdf_time(self, args):
         raise NotImplementedError
+
+    def _ser_ft(self, freq, args):
+        return None
 
     def _zero(self, args):
         return 1 - args[-1]
@@ -437,21 +452,17 @@ class PMT_Fitter:
             (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
         """
         ser_args = args[self._start_idx : -1]
-        pdf = self._pdf(ser_args)
+        occ = args[-1]
         const = self.const(ser_args)
-        if not np.all(np.isfinite(pdf)):
-            raise ValueError("Non-finite value in PDF.")
+
+        ft_cont = self._ser_to_ft(ser_args)
+        fft_input = (1 - const) * ft_cont + const
 
         b_sp = self._b_sp(args)
+        fft_processed = self._all_PE_processor(occ, b_sp)(fft_input)
+
+        fourier_pdf = self._ifft_pipeline(fft_processed)
         pass_threshold = self._efficiency(self.xsp, *args[: self._start_idx])
-        fourier_pdf = fft_and_ifft(
-            pdf,
-            self._shift,
-            self._xsp_width,
-            self._pad_safe,
-            self._all_PE_processor(args[-1], b_sp),
-            const,
-        )
         return fourier_pdf * pass_threshold
 
     def _estimate_smooth(self, args):
