@@ -456,7 +456,7 @@ class PMT_Fitter:
         const = self.const(ser_args)
 
         ft_cont = self._ser_to_ft(ser_args)
-        fft_input = (1 - const) * ft_cont + const
+        fft_input = ft_cont + const
 
         b_sp = self._b_sp(args)
         fft_processed = self._all_PE_processor(occ, b_sp)(fft_input)

@@ -75,7 +75,7 @@ class MCP_Fitter(PMT_Fitter):
         frac, k, theta, lam, k_ts, theta_ts = self._map_args(ser_args)
         ft_g = self._ft_gamma(freq, k, theta)
         ft_ts0 = self._ft_gamma(freq, k_ts, theta_ts)
-        ft_tw = np.exp(-lam) * (np.exp(lam * ft_ts0) - 1) / (1 - np.exp(-lam))
+        ft_tw = np.exp(-lam) * (np.exp(lam * ft_ts0) - 1)
         return frac * ft_g + (1 - frac) * ft_tw
 
     def Gms(self, args, occ):
