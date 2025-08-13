@@ -14,9 +14,8 @@ from .plot import plot_histogram_with_fit
 mpl.rc_file("tests/matplotlibrc")
 
 SEED = 42
-SAMPLES = 5000000
-# INTENSITIES = [0.5, 1.0, 2.0, 3.0, 4.0, 5.0]
-INTENSITIES = np.array([1.0])
+SAMPLES = 10000000
+INTENSITIES = np.array([0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
 OCCS = 1 - np.exp(-INTENSITIES)
 
 INIT = [
@@ -100,6 +99,7 @@ with PdfPages("mcp_fit.pdf") as pp:
             score_param_similarity(
                 fitted=np.append(fit.ser_args, fit.occ),
                 true=np.append(INIT[2:], occ),
+                fitted_sigma=np.append(fit.ser_args_std, fit.occ_std),
             )
         )
         resDfs.append(res)
