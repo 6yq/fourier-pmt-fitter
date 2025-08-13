@@ -1,0 +1,68 @@
+# Set default figure size
+figure.figsize : 8, 6
+figure.dpi : 100
+figure.constrained_layout.use: True
+
+xaxis.labellocation: right
+yaxis.labellocation: top
+# Set x axis
+xtick.direction : in
+xtick.major.size : 14
+xtick.major.width : 1
+xtick.minor.size : 7
+xtick.minor.width : 1
+xtick.minor.visible : True
+xtick.top : True
+xtick.labelsize : 25
+xtick.major.pad:     5    # distance to major tick label in points
+xtick.minor.pad:     5     # distance to the minor tick label in points
+
+# Set y axis
+ytick.direction : in
+ytick.major.size : 14
+ytick.major.width : 1
+ytick.minor.size : 7
+ytick.minor.width : 1
+ytick.minor.visible : True
+ytick.right : True
+ytick.labelsize : 25
+ytick.major.pad:     5     # distance to major tick label in points
+ytick.minor.pad:     5     # distance to the minor tick label in points
+
+# Set line widths
+axes.linewidth : 1.25
+grid.linewidth : 1
+lines.linewidth : 2
+lines.markersize : 6.0
+
+# Set line style as well for black and white graphs
+axes.prop_cycle : cycler('color', ["3D505A","D65190","FF8C00","0076B9","4DAF4A","E87B1E","C098B2","F898CB","731A73","FFCB5B"])
+
+# save config
+savefig.bbox : tight
+savefig.dpi : 100
+savefig.pad_inches : 0.08
+
+# Grid lines
+axes.grid : False
+axes.labelsize : 25
+axes.formatter.min_exponent: 2
+grid.linestyle : --
+grid.color : k
+grid.alpha : 0.6
+
+# Legend
+legend.frameon:       false
+legend.handletextpad: 0.4
+legend.numpoints:     1
+legend.labelspacing:  0.1
+legend.fontsize:      25
+
+
+# Use serif fonts
+font.size : 25
+font.family : serif
+font.serif :FreeSerif,Garamond,Georgia,Times New Roman
+# font.sans-serif: SimHei
+mathtext.fontset: stix
+axes.unicode_minus : False
