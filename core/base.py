@@ -389,7 +389,8 @@ class PMT_Fitter:
             y_est[y_est <= 0] = 1e-20
             # for whole spectrum, z_est doesn't matter because self.zero is 0
             # otherwise, only SPE parameters are needed to calculate z_est
-            z_est = self.A - y_est.sum()
+            # z_est = self.A - y_est.sum()
+            z_est = self.A * self._zero(args)
             return y_est, z_est
 
         return counter
