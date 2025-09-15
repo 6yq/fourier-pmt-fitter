@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -36,11 +37,16 @@ def plot_histogram_with_fit(
     # If occupancy is very small (< 0.01), use scientific notation
     if occ < 0.01:
         exponent = int(np.floor(np.log10(occ)))
-        mantissa = occ / 10**exponent
-        mantissa_std = occ_std / 10**exponent
+        mu = -math.log1p(-occ)
+        mu_std = occ_std / (1.0 - occ)
+        mantissa = mu / 10**exponent
+        mantissa_std = mu_std / 10**exponent
         occ_str = rf"({mantissa:.3f}$\pm${mantissa_std:.3f})$\times10^{exponent}$"
     else:
-        occ_str = rf"{occ:.3f}$\pm${occ_std:.3f}"
+        # occ_str = rf"{occ:.2%}$\pm${occ_std:.2%}"
+        mu = -math.log1p(-occ)
+        mu_std = occ_std / (1.0 - occ)
+        occ_str = rf"{mu:.3f}$\pm${mu_std:.3f}"
 
     ax_main.stairs(
         hist,
@@ -48,7 +54,7 @@ def plot_histogram_with_fit(
         fill=True,
         color="C0",
         alpha=0.2,
-        label=f"occupancy: {occ_str}",
+        label=f"$\mu$ = {occ_str}",
     )
     ax_main.errorbar(
         bin_centers,
@@ -65,7 +71,7 @@ def plot_histogram_with_fit(
         xsp,
         smooth,
         color="red",
-        label=(f"$\chi^2$/ndf: {chiSq:.2f}/{ndf}" if chiSq is not None else "fit"),
+        label=(f"$\chi^2$/ndf = {chiSq:.2f}/{ndf}" if chiSq is not None else "fit"),
     )
 
     if len(params) == 6 and gp is not None:
