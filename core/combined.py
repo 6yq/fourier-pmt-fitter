@@ -216,27 +216,30 @@ class CombinedFitter:
     #   Axis scaling (time domain)
     # -------------------------
     def _make_scaled_ser_to_ft(self, sp_idx: int, s: float):
-        """Build a _ser_to_ft(ser_args) that applies axis scaling by factor s>0.
+        """Return a _ser_to_ft(ser_args) applying axis scaling by s>0.
 
-        Implementation (time-domain resampling):
+        Prefer analytic FT if available: P_s(ω) = P(ω s).
+        Otherwise fall back to time-domain resampling:
             p_s(x) = (1/s) * p(x/s)
-        evaluated on the spectrum's existing x-grid .xsp, then padded+FFT.
+        evaluated on the fitter's own x-grid (.xsp), then roll+pad+FFT.
         """
         f = self.specs[sp_idx].fitter
         orig_ser_pdf = self._orig_ser_pdf[sp_idx]
 
-        # guard against pathological s
+        # guard
         s = float(max(s, 1e-8))
 
         def ser_to_ft_scaled(ser_args: np.ndarray):
-            # Evaluate base SER pdf on the native grid
-            pdf_base = orig_ser_pdf(ser_args)  # shape = len(f.xsp)
+            # --- Try analytic FT first
+            ft = f._ser_ft(f._freq * s, ser_args)
+            if ft is not None:
+                return ft
 
-            # Resample: p_s(x) = p(x/s)/s on same grid
+            # --- Fallback: time-domain resampling with Jacobian 1/s
+            pdf_base = orig_ser_pdf(ser_args)  # on f.xsp
             x = f.xsp
             pdf_scaled = (1.0 / s) * np.interp(x / s, x, pdf_base, left=0.0, right=0.0)
 
-            # Standard pipeline: roll, pad, FFT
             pdf_padded, _, _ = roll_and_pad(pdf_scaled, f._shift, f._pad_safe)
             return fft(pdf_padded) * f._xsp_width
 
