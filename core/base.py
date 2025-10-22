@@ -1,4 +1,6 @@
 import numpy as np
+
+from math import log
 from scipy.stats import norm
 from scipy.fft import fft, ifft
 
@@ -63,6 +65,7 @@ class PMT_Fitter:
         threshold=None,
         auto_init=False,
         seterr: str = "warn",
+        fit_total: bool = True,
         **peak_kwargs,
     ):
         # -------------------------
@@ -71,6 +74,7 @@ class PMT_Fitter:
         np.seterr(all=seterr)
         self.seterr = seterr
         self._isWholeSpectrum = isWholeSpectrum
+        self._fit_total = fit_total
         self.A = A if A is not None else sum(hist)
         self._init = init if isinstance(init, np.ndarray) else np.array(init)
         self.bounds = (
@@ -212,6 +216,11 @@ class PMT_Fitter:
             else:
                 self.init = np.append(self._init, self._occ_init)
 
+        if self._fit_total:
+            logA0 = log(self.A)
+            self.init = np.insert(self.init, 0, logA0)
+            self.bounds.insert(0, (None, None))
+
         self.dof = len(self.init)
         self.bounds.append(
             (
@@ -234,19 +243,19 @@ class PMT_Fitter:
     def _produce_efficiency(self, threshold_type):
         if not self._isWholeSpectrum:
             if threshold_type == "logistic":
-                return lambda x, center, scale: 1 / (1 + np.exp(-(x - center) / scale))
+                return lambda x, *ps: 1 / (1 + np.exp(-(x - ps[-2]) / ps[-1]))
             elif threshold_type == "erf":
                 from scipy.special import erf
 
-                return lambda x, center, scale: 0.5 * (
-                    1 + erf((x - center) / (scale * np.sqrt(2)))
+                return lambda x, *ps: 0.5 * (
+                    1 + erf((x - ps[-2]) / (ps[-1] * np.sqrt(2)))
                 )
             elif threshold_type is None:
-                return lambda x: np.ones_like(x)
+                return lambda x, *ps: np.ones_like(x)
             else:
                 raise ValueError(f"Unknown threshold type: {threshold_type}")
         else:
-            return lambda x: np.ones_like(x)
+            return lambda x, *ps: np.ones_like(x)
 
     def _produce_all_PE_processor(self):
         if self._isWholeSpectrum:
@@ -258,7 +267,7 @@ class PMT_Fitter:
             )
         else:
             return lambda occupancy, b_sp: lambda s_sp: (1 - occupancy) * (
-                np.exp(-np.log(1 - occupancy) * s_sp) - 1
+                np.expm1(-np.log(1 - occupancy) * s_sp)
             )
 
     def _produce_nPE_processor(self):
@@ -273,7 +282,9 @@ class PMT_Fitter:
             return (
                 lambda args: fft(
                     roll_and_pad(
-                        self._pdf_ped(args[: self._start_idx]),
+                        self._pdf_ped(
+                            args[self._head() : self._head() + self._start_idx]
+                        ),  # CHG
                         self._shift,
                         self._pad_safe,
                     )[0]
@@ -324,15 +335,13 @@ class PMT_Fitter:
         def pdf_sr_n(args, n):
             if n == 0:
                 return (
-                    self._pdf_ped(args[: self._start_idx])
+                    self._pdf_ped(args[self._head() : self._head() + self._start_idx])
                     if self._isWholeSpectrum
                     else np.zeros_like(self.xsp)
                 )
-
-            ser_args = args[self._start_idx : -1]
+            ser_args = args[self._head() + self._start_idx : -1]  # CHG
             occ = args[-1]
             const = self.const(ser_args)
-
             ft_cont = self._ser_to_ft(ser_args)
             fft_input = (1 - const) * ft_cont + const
             fft_processed = self._nPE_processor(occ, n)(fft_input)
@@ -369,35 +378,39 @@ class PMT_Fitter:
         self._simp_w = w
 
         def counter(args):
-            y_sp = self.A * self._pdf_sr(args=args)
+            A_now = self._A_from_args(args)
+            y_sp = A_now * self._pdf_sr(args=args)
 
             if need_mask_delta:
                 y_sp[0] = 0.0
 
             nbin = len(self.hist)
-            # indices[i, j] = abs_shift + sample*i + j
+            abs_shift = abs(self._shift)
             idx = (
-                abs(self._shift)
+                abs_shift
                 + self.sample * np.arange(nbin)[:, None]
                 + np.arange(self.sample + 1)[None, :]
             )
             seg = y_sp[idx]  # (nbin, sample+1)
-
             y_est = seg @ self._simp_w
-
-            # nonegative pdf set
             y_est[y_est <= 0] = 1e-20
-            # for whole spectrum, z_est doesn't matter because self.zero is 0
-            # otherwise, only SPE parameters are needed to calculate z_est
-            # z_est = self.A - y_est.sum()
-            z_est = self.A * self._zero(args)
+
+            front_count = 0.0
+            if abs_shift > 0:
+                front_count = np.trapz(y_sp[:abs_shift], dx=self._xsp_width)
+
+            tail = args[self._head() + self._start_idx :]
+            z_est = A_now * self._zero(tail) + front_count
+
             return y_est, z_est
 
         return counter
 
     def _produce_constraint_checker(self):
         if self.constraints:
-            return lambda args: isParamsWithinConstraints(args, self.constraints)
+            return lambda args: isParamsWithinConstraints(
+                args[self._head() + self._start_idx :], self.constraints
+            )
         else:
             return lambda args: True
 
@@ -426,19 +439,23 @@ class PMT_Fitter:
     def get_gain(self, args):
         raise NotImplementedError
 
-    def _log_l_C(self):
-        """Return constant in log likelihood.
+    def _A_from_args(self, args):
+        if self._fit_total:
+            logA = np.clip(args[0], 0, np.log(1e12))
+            return np.exp(logA)
+        else:
+            return self.A
 
-        Notes
-        -----
-        C = NlnN - ln(N!) + sum_j(ln(nj!))
-        """
-        N = sum(self.hist) + self.zero
-        N_part = N * np.log(N) - sum(np.log(np.arange(1, N + 1)))
-        n_part = sum([sum(np.log(np.arange(1, n + 1))) for n in self.hist]) + sum(
-            np.log(np.arange(1, self.zero + 1))
-        )
-        return N_part + n_part
+    def _head(self):
+        return 1 if getattr(self, "_fit_total", False) else 0
+
+    def _log_l_C(self):
+        """Return factorial constant in (extended) Poisson log-likelihood."""
+        N0 = int(self.zero)
+        hist = self.hist
+        n_part = sum([sum(np.log(np.arange(1, int(n) + 1))) for n in hist])
+        n0_part = sum(np.log(np.arange(1, N0 + 1)))
+        return n_part + n0_part
 
     def _pdf_ped(self, args):
         return norm.pdf(self.xsp, loc=args[0], scale=args[1])
@@ -452,7 +469,7 @@ class PMT_Fitter:
             (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
             (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
         """
-        ser_args = args[self._start_idx : -1]
+        ser_args = args[self._head() + self._start_idx : -1]  # CHG
         occ = args[-1]
         const = self.const(ser_args)
 
@@ -463,15 +480,20 @@ class PMT_Fitter:
         fft_processed = self._all_PE_processor(occ, b_sp)(fft_input)
 
         fourier_pdf = self._ifft_pipeline(fft_processed)
-        pass_threshold = self._efficiency(self.xsp, *args[: self._start_idx])
+        extra = args[self._head() : self._head() + self._start_idx]
+        pass_threshold = self._efficiency(self.xsp, *extra)
         return fourier_pdf * pass_threshold
 
     def _estimate_smooth(self, args):
-        return self.A * self._bin_width * self._pdf_sr(args=args)[abs(self._shift) :]
+        return (
+            self._A_from_args(args)
+            * self._bin_width
+            * self._pdf_sr(args=args)[abs(self._shift) :]
+        )
 
     def estimate_smooth_n(self, args, n):
         return (
-            self.A
+            self._A_from_args(args)
             * self._bin_width
             * self._pdf_sr_n(args=args, n=n)[abs(self._shift) :]
         )
@@ -487,11 +509,12 @@ class PMT_Fitter:
         """
         # make sure args are in range (an infinite "well")
         try:
-            if isParamsInBound(args, self.bounds) and self._constraint_checker(
-                args[self._start_idx :]
-            ):
+            if isParamsInBound(args, self.bounds) and self._constraint_checker(args):
                 y, z = self._estimate_count(args)
-                log_l = self.zero * np.log(z) + np.sum(self.hist * np.log(y)) - self._C
+                ll_bins = np.sum(self.hist * np.log(y) - y)
+                ll_zero = self.zero * np.log(z) - z
+                log_l = ll_bins + ll_zero - self._C
+
                 # temporary fix for NaN log likelihood
                 if np.isnan(log_l):
                     return -np.inf
@@ -653,32 +676,21 @@ class PMT_Fitter:
 
         sampler.reset()
 
-        self.ser_args = args_complete[self._start_idx : -1]
-        self.ser_args_std = args_complete_std[self._start_idx : -1]
+        h = self._head()
+        start = h + self._start_idx
+        self.additional_args = args_complete[h:start]
+        self.additional_args_std = args_complete_std[h:start]
+        self.ser_args = args_complete[start:-1]
+        self.ser_args_std = args_complete_std[start:-1]
+        self.occ, self.occ_std = args_complete[-1], args_complete_std[-1]
 
-        # for whole spectrum, additional args belong to pedestal
-        # otherwise, they are from threshold effect
-        self.additional_args = args_complete[: self._start_idx]
-        self.additional_args_std = args_complete_std[: self._start_idx]
-
-        # _zero() is a fix of real zero count
-        occReg = 1 - np.apply_along_axis(
-            self._zero, axis=1, arr=flat_chain[:, self._start_idx :]
-        )
-        self.occ = np.mean(occReg, axis=0)
-        self.occ_std = np.std(occReg, axis=0)
-
+        h = self._head()
+        start = h + self._start_idx
         self.gps = np.apply_along_axis(
-            self.get_gain,
-            axis=1,
-            arr=flat_chain[:, self._start_idx : -1],
-            gain="gp",
+            self.get_gain, axis=1, arr=flat_chain[:, start:-1], gain="gp"
         )
         self.gms = np.apply_along_axis(
-            self.get_gain,
-            axis=1,
-            arr=flat_chain[:, self._start_idx : -1],
-            gain="gm",
+            self.get_gain, axis=1, arr=flat_chain[:, start:-1], gain="gm"
         )
 
         print(f"[INFO] Current burn-in: {burn_in} steps", flush=True)
@@ -819,15 +831,18 @@ class PMT_Fitter:
                 if failCnt >= 6:
                     break
 
+        self.converged = failCnt < 6
         m.Hesse()
 
         args_complete = np.array([m.X()[i] for i in range(self.dof)])
         args_complete_std = np.array([m.Errors()[i] for i in range(self.dof)])
 
-        self.additional_args = args_complete[: self._start_idx]
-        self.additional_args_std = args_complete_std[: self._start_idx]
-        self.ser_args = args_complete[self._start_idx : -1]
-        self.ser_args_std = args_complete_std[self._start_idx : -1]
+        h = self._head()
+        start = h + self._start_idx
+        self.additional_args = args_complete[h:start]
+        self.additional_args_std = args_complete_std[h:start]
+        self.ser_args = args_complete[start:-1]
+        self.ser_args_std = args_complete_std[start:-1]
         self.occ, self.occ_std = args_complete[-1], args_complete_std[-1]
 
         self.gps = self.get_gain(self.ser_args, "gp")

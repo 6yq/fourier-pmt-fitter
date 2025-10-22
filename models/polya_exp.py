@@ -49,6 +49,7 @@ class Polya_Exp_Fitter(PMT_Fitter):
         threshold=None,
         auto_init=False,
         seterr: str = "warn",
+        fit_total: bool = True,
         **peak_kwargs,
     ):
         super().__init__(
@@ -64,6 +65,7 @@ class Polya_Exp_Fitter(PMT_Fitter):
             threshold,
             auto_init,
             seterr,
+            fit_total,
             **peak_kwargs,
         )
 
