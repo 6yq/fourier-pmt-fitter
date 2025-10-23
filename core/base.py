@@ -96,6 +96,13 @@ class PMT_Fitter:
         self.hist = np.asarray(hist)
         self.bins = np.asarray(bins)
 
+        bins_mid = (self.bins[:-1] + self.bins[1:]) / 2
+        mu_hat = -log(1 - self._occ_init)
+        mu_est = mu_hat - (self._occ_init / (1 - self._occ_init)) / (2 * A)
+        self.gms_prime = (
+            np.average(bins_mid, weights=self.hist) * mu_est / (1 - np.exp(-mu_est))
+        )
+
         self.zero = self.A - sum(self.hist)
         if self._isWholeSpectrum:
             assert self.zero == 0, "[ERROR] have a zero bug, please post an issue :)"
@@ -224,8 +231,8 @@ class PMT_Fitter:
         self.dof = len(self.init)
         self.bounds.append(
             (
-                0.0,
-                1.0,
+                self._occ_init * 0.8,
+                self._occ_init * 1.2,
             )
         )
         self.bounds = tuple(self.bounds)
@@ -333,19 +340,33 @@ class PMT_Fitter:
         """
 
         def pdf_sr_n(args, n):
+            a = np.asarray(args, float)
+            h = self._head()
+            n_ser = len(self.init) - h - self._start_idx - 1
+
+            if a.size == len(self.init):
+                ser_args = a[h + self._start_idx : -1]
+                occ = a[-1]
+            elif a.size == n_ser + 1:
+                ser_args = a[:-1]
+                occ = a[-1]
+            else:
+                raise ValueError(
+                    f"args length {a.size} invalid; "
+                    f"need full({len(self.init)}) or tail({n_ser+1})."
+                )
+
             if n == 0:
                 return (
-                    self._pdf_ped(args[self._head() : self._head() + self._start_idx])
+                    self._pdf_ped(a[h : h + self._start_idx])
                     if self._isWholeSpectrum
                     else np.zeros_like(self.xsp)
                 )
-            ser_args = args[self._head() + self._start_idx : -1]  # CHG
-            occ = args[-1]
+
             const = self.const(ser_args)
-            ft_cont = self._ser_to_ft(ser_args)
-            fft_input = (1 - const) * ft_cont + const
-            fft_processed = self._nPE_processor(occ, n)(fft_input)
-            return self._ifft_pipeline(fft_processed)
+            ft = self._ser_to_ft(ser_args)
+            fft_in = (1 - const) * ft + const
+            return self._ifft_pipeline(self._nPE_processor(occ, n)(fft_in))
 
         return pdf_sr_n
 
@@ -469,7 +490,7 @@ class PMT_Fitter:
             (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
             (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
         """
-        ser_args = args[self._head() + self._start_idx : -1]  # CHG
+        ser_args = args[self._head() + self._start_idx : -1]
         occ = args[-1]
         const = self.const(ser_args)
 
@@ -484,12 +505,15 @@ class PMT_Fitter:
         pass_threshold = self._efficiency(self.xsp, *extra)
         return fourier_pdf * pass_threshold
 
+    # 先看看到 0 怎么样
+    # def _estimate_smooth(self, args):
+    #     return (
+    #         self._A_from_args(args)
+    #         * self._bin_width
+    #         * self._pdf_sr(args=args)[abs(self._shift) :]
+    #     )
     def _estimate_smooth(self, args):
-        return (
-            self._A_from_args(args)
-            * self._bin_width
-            * self._pdf_sr(args=args)[abs(self._shift) :]
-        )
+        return self._A_from_args(args) * self._bin_width * self._pdf_sr(args=args)
 
     def estimate_smooth_n(self, args, n):
         return (
