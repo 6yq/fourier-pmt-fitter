@@ -15,7 +15,7 @@ class MCP_Fitter(PMT_Fitter):
         A=None,
         occ_init=None,
         sample=None,
-        init=[0.60, 0.6, 0.25, 5.0, 0.40, 0.65],
+        init=[0.60, 0.6, 0.25, 5.0, 0.6, 0.2],
         bounds=[
             (0.0, 1.0),
             (0, None),
