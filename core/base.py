@@ -365,7 +365,7 @@ class PMT_Fitter:
 
             const = self.const(ser_args)
             ft = self._ser_to_ft(ser_args)
-            fft_in = (1 - const) * ft + const
+            fft_in = ft + const
             return self._ifft_pipeline(self._nPE_processor(occ, n)(fft_in))
 
         return pdf_sr_n
@@ -505,21 +505,12 @@ class PMT_Fitter:
         pass_threshold = self._efficiency(self.xsp, *extra)
         return fourier_pdf * pass_threshold
 
-    # 先看看到 0 怎么样
-    # def _estimate_smooth(self, args):
-    #     return (
-    #         self._A_from_args(args)
-    #         * self._bin_width
-    #         * self._pdf_sr(args=args)[abs(self._shift) :]
-    #     )
     def _estimate_smooth(self, args):
         return self._A_from_args(args) * self._bin_width * self._pdf_sr(args=args)
 
     def estimate_smooth_n(self, args, n):
         return (
-            self._A_from_args(args)
-            * self._bin_width
-            * self._pdf_sr_n(args=args, n=n)[abs(self._shift) :]
+            self._A_from_args(args) * self._bin_width * self._pdf_sr_n(args=args, n=n)
         )
 
     def log_l(self, args) -> float:
@@ -858,16 +849,16 @@ class PMT_Fitter:
         self.converged = failCnt < 6
         m.Hesse()
 
-        args_complete = np.array([m.X()[i] for i in range(self.dof)])
-        args_complete_std = np.array([m.Errors()[i] for i in range(self.dof)])
+        self.full_args = np.array([m.X()[i] for i in range(self.dof)])
+        self.full_args_std = np.array([m.Errors()[i] for i in range(self.dof)])
 
         h = self._head()
         start = h + self._start_idx
-        self.additional_args = args_complete[h:start]
-        self.additional_args_std = args_complete_std[h:start]
-        self.ser_args = args_complete[start:-1]
-        self.ser_args_std = args_complete_std[start:-1]
-        self.occ, self.occ_std = args_complete[-1], args_complete_std[-1]
+        self.additional_args = self.full_args[h:start]
+        self.additional_args_std = self.full_args_std[h:start]
+        self.ser_args = self.full_args[start:-1]
+        self.ser_args_std = self.full_args_std[start:-1]
+        self.occ, self.occ_std = self.full_args[-1], self.full_args_std[-1]
 
         self.gps = self.get_gain(self.ser_args, "gp")
         self.gms = self.get_gain(self.ser_args, "gm")
@@ -911,19 +902,19 @@ class PMT_Fitter:
 
         self.likelihood = -m.MinValue()
         self.chi_sq_pearson, self.ndf_merged = self.get_chi_sq(
-            args_complete, merged_pearson_chi2, dof=self.dof
+            self.full_args, merged_pearson_chi2, dof=self.dof
         )
         self.chi_sq_neyman_A, self.ndf = self.get_chi_sq(
-            args_complete, modified_neyman_chi2_A, dof=self.dof
+            self.full_args, modified_neyman_chi2_A, dof=self.dof
         )
         self.chi_sq_neyman_B, _ = self.get_chi_sq(
-            args_complete, modified_neyman_chi2_B, dof=self.dof
+            self.full_args, modified_neyman_chi2_B, dof=self.dof
         )
         self.chi_sq_mighell, _ = self.get_chi_sq(
-            args_complete, mighell_chi2, dof=self.dof
+            self.full_args, mighell_chi2, dof=self.dof
         )
-        self.smooth = self._estimate_smooth(args_complete)
-        self.ys, self.zs = self._estimate_count(args_complete)
+        self.smooth = self._estimate_smooth(self.full_args)
+        self.ys, self.zs = self._estimate_count(self.full_args)
 
     def fit(self, method="minuit", **kwargs):
         """Fit with MCMC or Minuit.
