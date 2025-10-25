@@ -18,10 +18,10 @@ class Recursive_Fitter(PMT_Fitter):
         occ_init=None,
         sample=None,
         init=[
-            0.60,  # channel-mode ratio
+            0.40,  # channel-mode ratio
             0.6,  # channel-mode mean
             0.25,  # channel-mode sigma
-            5.0,  # channel-mode sey
+            4.5,  # channel-mode sey
             1.0,  # recursive sey
             0.60,  # recursive mean
             0.20,  # recursive sigma
@@ -127,7 +127,7 @@ class Recursive_Fitter(PMT_Fitter):
         fft_input = np.exp(lam * (ft_r - 1))
         s_sp = self._nPE_processor(occ, 1)(fft_input)
         ifft_pdf = self._ifft_pipeline(s_sp)
-        return (1 - frac) * ifft_pdf
+        return self.A * self._bin_width * (1 - frac) * ifft_pdf
 
     def get_gain(self, args, gain: str = "gm"):
         if gain == "gp":
