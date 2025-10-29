@@ -173,15 +173,11 @@ class PMT_Fitter:
                 self._replace_spe_bounds(spe_gp, spe_sigma, self._occ_init)
                 self.init = np.array([ped_gp, ped_sigma, *self._init, self._occ_init])
 
-                ped_peak_fluc = 5
-                ped_sigma_percentile = 0.2
+                ped_peak_fluc = 0.5 * (spe_gp - ped_gp)
                 self.bounds.insert(0, (ped_gp - ped_peak_fluc, ped_gp + ped_peak_fluc))
                 self.bounds.insert(
                     1,
-                    (
-                        ped_sigma * (1 - ped_sigma_percentile),
-                        ped_sigma * (1 + ped_sigma_percentile),
-                    ),
+                    (0, ped_peak_fluc),
                 )
             else:
                 self.init = np.append(self._init, self._occ_init)
@@ -231,8 +227,8 @@ class PMT_Fitter:
         self.dof = len(self.init)
         self.bounds.append(
             (
-                self._occ_init * 0.8,
-                self._occ_init * 1.2,
+                self._occ_init * 0.90,
+                min(self._occ_init * 1.10, 1.0 - 1e-06),
             )
         )
         self.bounds = tuple(self.bounds)
