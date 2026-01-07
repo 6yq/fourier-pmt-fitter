@@ -418,10 +418,6 @@ class Gauss_Compound_Fitter(PMT_Fitter):
             **peak_kwargs,
         )
 
-    def const(self, ser_args):
-        frac, mu, sigma, lam, mu_ts, sigma_ts = ser_args
-        return (1 - frac) * np.exp(-lam)
-
     def _map_args(self, args):
         frac, mu, sigma, lam, mu_ts, sigma_ts = args
         mu_prime = mu * mu_ts
