@@ -66,6 +66,7 @@ class PMT_Fitter:
         auto_init=False,
         seterr: str = "warn",
         fit_total: bool = True,
+        threshold_scale: float = 500.0,
         **peak_kwargs,
     ):
         # -------------------------
@@ -193,27 +194,27 @@ class PMT_Fitter:
                 except:
                     print(f"[WARNING] Cannot find SPE peak.", flush=True)
             if threshold is not None:
-                # TODO: is bins[1] good enough to be the initial value?
-                # TODO: is bin_width good enought to be the initial value?
-                threshold_center, threshold_scale = bins[1], self._bin_width
+                # The efficiency curve (for FSMP) is calibrated from ToyMC
+                loc, scale = [0.08161452, 0.02022103]
+                threshold_center = loc * threshold_scale
+                threshold_scale = scale * threshold_scale
+
                 self.init = np.array(
                     [threshold_center, threshold_scale, *self._init, self._occ_init]
                 )
-                # TODO: is 5 times bin width enough?
-                threshold_scale_fluc = 4 * threshold_scale
-                # threshold effect center should be between 0 and the SPE peak
+                threshold_scale_fluc = 0.100
                 self.bounds.insert(
                     0,
                     (
-                        0,
-                        bins[np.argmax(hist) + 1],
+                        max(0, threshold_center * (1 - threshold_scale_fluc)),
+                        threshold_center * (1 + threshold_scale_fluc),
                     ),
                 )
                 self.bounds.insert(
                     1,
                     (
-                        0,
-                        threshold_scale + threshold_scale_fluc,
+                        threshold_scale * (1 - threshold_scale_fluc),
+                        threshold_scale * (1 + threshold_scale_fluc),
                     ),
                 )
             else:
