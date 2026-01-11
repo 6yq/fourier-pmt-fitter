@@ -320,6 +320,10 @@ class CombinedFitter:
                 flush=True,
             )
 
+        if errors is not None:
+            self.ser_args = params[self._ser_slice]
+            self.ser_args_std = errors[self._ser_slice]
+
         # Occupancies
         print(f"{prefix}Occupancies:", flush=True)
         for i, idx in enumerate(self._occ_indices):
@@ -342,3 +346,7 @@ class CombinedFitter:
                 f"{prefix}  Spectrum {i}: {params[idx]:.4g}{err_str}  (bounds: [{lo_str}, {hi_str}]){at_bound}",
                 flush=True,
             )
+
+        if errors is not None:
+            self.occs = params[self._occ_indices]
+            self.occs_std = errors[self._occ_indices]
