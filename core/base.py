@@ -196,25 +196,25 @@ class PMT_Fitter:
             if threshold is not None:
                 # The efficiency curve (for FSMP) is calibrated from ToyMC
                 loc, scale = [0.08161452, 0.02022103]
-                threshold_center = loc * threshold_scale
-                threshold_scale = scale * threshold_scale
+                thres_center = loc * threshold_scale
+                thres_scale = scale * threshold_scale
 
                 self.init = np.array(
-                    [threshold_center, threshold_scale, *self._init, self._occ_init]
+                    [thres_center, thres_scale, *self._init, self._occ_init]
                 )
                 threshold_scale_fluc = 0.100
                 self.bounds.insert(
                     0,
                     (
-                        max(0, threshold_center * (1 - threshold_scale_fluc)),
-                        threshold_center * (1 + threshold_scale_fluc),
+                        max(0, thres_center * (1 - threshold_scale_fluc)),
+                        thres_center * (1 + threshold_scale_fluc),
                     ),
                 )
                 self.bounds.insert(
                     1,
                     (
-                        threshold_scale * (1 - threshold_scale_fluc),
-                        threshold_scale * (1 + threshold_scale_fluc),
+                        thres_scale * (1 - threshold_scale_fluc),
+                        thres_scale * (1 + threshold_scale_fluc),
                     ),
                 )
             else:
