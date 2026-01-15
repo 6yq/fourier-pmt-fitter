@@ -258,8 +258,15 @@ class CombinedFitter:
         self.param_errors = errors
         self.likelihood = -m.MinValue()
 
+        self.n_data = sum(len(f.hist) + 1 for f in self.fitters)  # +1 for zero bin
+        self.bic = -2 * self.likelihood + self.dof * np.log(self.n_data)
+        self.aic = -2 * self.likelihood + 2 * self.dof
+
         print(f"\n[INFO] Converged: {self.converged}", flush=True)
         print(f"[INFO] Log-likelihood: {self.likelihood:.6f}", flush=True)
+        print(f"[INFO] n_data: {self.n_data}, n_params: {self.dof}", flush=True)
+        print(f"[INFO] BIC: {self.bic:.6f}", flush=True)
+        print(f"[INFO] AIC: {self.aic:.6f}", flush=True)
         print("[INFO] Fitted parameters:", flush=True)
         self._print_params(fitted, self.bounds, errors, prefix="  ")
 
