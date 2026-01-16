@@ -316,7 +316,8 @@ class PMT_Fitter:
 
         def ifft_back(s_sp_processed):
             ifft_full = np.real(ifft(s_sp_processed)) / self._xsp_width
-            return np.roll(ifft_full, -self._shift_padded)[self._recover_slice]
+            result = np.roll(ifft_full, -self._shift_padded)[self._recover_slice]
+            return np.maximum(result, 0.0)
 
         return ifft_back
 
@@ -411,7 +412,7 @@ class PMT_Fitter:
             )
             seg = y_sp[idx]  # (nbin, sample+1)
             y_est = seg @ self._simp_w
-            y_est[y_est <= 0] = 1e-20
+            y_est = np.maximum(y_est, 1e-32)
 
             front_count = 0.0
             if abs_shift > 0:
@@ -519,26 +520,19 @@ class PMT_Fitter:
             (ser_args_1, ..., ser_args_(dof), occ) if only PE spectrum,
             (ped_mean, ped_sigma, ser_args_1, ..., ser_args_(dof-2), occ) otherwise
         """
-        # make sure args are in range (an infinite "well")
-        try:
-            if isParamsInBound(args, self.bounds) and self._constraint_checker(args):
-                y, z = self._estimate_count(args)
+        if isParamsInBound(args, self.bounds) and self._constraint_checker(args):
+            y, z = self._estimate_count(args)
+
+            with np.errstate(divide="ignore", invalid="ignore"):
                 ll_bins = np.sum(self.hist * np.log(y) - y)
                 ll_zero = self.zero * np.log(z) - z
-                log_l = ll_bins + ll_zero - self._C
 
-                # temporary fix for NaN log likelihood
-                if np.isnan(log_l):
-                    return -np.inf
-                return log_l
-            else:
+            log_l = ll_bins + ll_zero - self._C
+
+            if np.isnan(log_l) or not np.isfinite(log_l):
                 return -np.inf
-        except ValueError as e:
-            if self.seterr != "ignore":
-                print(
-                    "[WARNING] Some chain(s) have Inf/NaN PDF value(s). Please improve the PDF robustness of your model.",
-                    flush=True,
-                )
+            return log_l
+        else:
             return -np.inf
 
     def get_chi_sq(self, args, chiSqFunc: callable, dof: int) -> float:
