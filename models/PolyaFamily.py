@@ -258,7 +258,7 @@ class Gamma_Tweedie_Fitter(PMT_Fitter):
             (0.3, 1.0),
             (0, None),
             (0, None),
-            (1, None),
+            (1, 6.5),
             (0, 1),
             (0, 1),
         ],
