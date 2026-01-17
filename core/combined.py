@@ -230,9 +230,10 @@ class CombinedFitter:
             if fail_count < 2:
                 this_tol = tol
             elif fail_count < 4:
-                this_tol = max(10 * tol, 1.0)
+                this_tol = min(10 * tol, 1.0)
             else:
-                this_tol = max(50 * tol, 5.0)
+                this_tol = min(10 * tol, 1.0)
+                strategy = 3 - strategy
 
             m = ROOT.Math.Factory.CreateMinimizer("Minuit2", algo)
             configure_minimizer(m, strategy, this_tol, max_calls, print_level)

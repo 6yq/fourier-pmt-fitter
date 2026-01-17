@@ -819,9 +819,11 @@ class PMT_Fitter:
             if failCnt < 2:
                 this_tol = tol
             elif failCnt < 4:
-                this_tol = max(10 * tol, 1.0)
+                this_tol = min(10 * tol, 1.0)
             else:
-                this_tol = max(50 * tol, 5.0)
+                this_tol = min(10 * tol, 1.0)
+                strategy = 3 - strategy
+
             m = ROOT.Math.Factory.CreateMinimizer("Minuit2", algo)
             _configure_minimizer(m, strategy, this_tol, max_calls, print_level)
 
