@@ -332,6 +332,10 @@ class CombinedFitter:
             self.ser_args = params[self._ser_slice]
             self.ser_args_std = errors[self._ser_slice]
 
+            ref = self.fitters[0]
+            self.gps = ref.get_gain(self.ser_args, "gp")
+            self.gms = ref.get_gain(self.ser_args, "gm")
+
         # Occupancies
         print(f"{prefix}Occupancies:", flush=True)
         for i, idx in enumerate(self._occ_indices):
