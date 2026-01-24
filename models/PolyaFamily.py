@@ -36,6 +36,7 @@ class BiPolya_Fitter(PMT_Fitter):
         auto_init=False,
         seterr: str = "warn",
         fit_total: bool = True,
+        threshold_scale: float = 500.0,
         **peak_kwargs,
     ):
         super().__init__(
@@ -52,6 +53,7 @@ class BiPolya_Fitter(PMT_Fitter):
             auto_init,
             seterr,
             fit_total,
+            threshold_scale,
             **peak_kwargs,
         )
 
@@ -162,6 +164,7 @@ class Polya_Exp_Fitter(PMT_Fitter):
         auto_init=False,
         seterr: str = "warn",
         fit_total: bool = True,
+        threshold_scale: float = 500.0,
         **peak_kwargs,
     ):
         super().__init__(
@@ -178,44 +181,45 @@ class Polya_Exp_Fitter(PMT_Fitter):
             auto_init,
             seterr,
             fit_total,
+            threshold_scale,
             **peak_kwargs,
         )
 
-    def _pdf_polya(self, x, frac, mean, sigma):
+    def _ft_gamma(self, freq, k, theta):
+        return (1 + 1j * theta * freq) ** (-k)
+
+    def _ft_exp(self, freq, scale):
+        return (1 + 1j * scale * freq) ** (-1)
+
+    def _ser_ft(self, freq, ser_args):
+        frac, mean, sigma, scale = ser_args
         k = (mean / sigma) ** 2
         theta = mean / k
-        return (1 - frac) * gamma.pdf(x, a=k, scale=theta)
+        ft_g = self._ft_gamma(freq, k, theta)
+        ft_e = self._ft_exp(freq, scale)
+        return (1 - frac) * ft_g + frac * ft_e
 
-    def _pdf_exp(self, x, frac, scale):
-        return frac * expon.pdf(x, scale=scale)
-
-    def _pdf(self, args):
-        frac, mean, sigma, scale = args
-        return self._pdf_polya(self.xsp, frac, mean, sigma) + self._pdf_exp(
-            self.xsp, frac, scale
-        )
+    def _pdf_gm(self, frac, k, theta, occ):
+        fft_input = self._ft_gamma(self._freq, k, theta)
+        s_sp = self._nPE_processor(occ, 1)(fft_input)
+        ifft_pdf = self._ifft_pipeline(s_sp)
+        return (1 - frac) * ifft_pdf
 
     def Polya(self, args, occ):
         frac, mean, sigma, _ = args
-        mu_l = -np.log(1 - occ)
-        return (
-            self.A
-            * mu_l
-            * np.exp(-mu_l)
-            * self._bin_width
-            * self._pdf_polya(self.xsp, frac, mean, sigma)
-        )
+        k = (mean / sigma) ** 2
+        theta = mean / k
+        return self.A * self._bin_width * self._pdf_gm(frac, k, theta, occ)
+
+    def _pdf_exp(self, frac, scale, occ):
+        fft_input = self._ft_exp(self._freq, scale)
+        s_sp = self._nPE_processor(occ, 1)(fft_input)
+        ifft_pdf = self._ifft_pipeline(s_sp)
+        return frac * ifft_pdf
 
     def Exponential(self, args, occ):
         frac, _, _, scale = args
-        mu_l = -np.log(1 - occ)
-        return (
-            self.A
-            * mu_l
-            * np.exp(-mu_l)
-            * self._bin_width
-            * self._pdf_exp(self.xsp, frac, scale)
-        )
+        return self.A * self._bin_width * self._pdf_exp(frac, scale, occ)
 
     def get_gain(self, args, gain: str = "gm"):
         if gain == "gp":
@@ -232,11 +236,13 @@ class Polya_Exp_Fitter(PMT_Fitter):
         coef = 1 + np.log(1 - occ) / 4
         self._init[1] = gp_init
         self._init[2] = 0.6 * coef * sigma_init
+        self._init[3] = gp_init
 
     def _replace_spe_bounds(self, gp_bound, sigma_bound, occ=0):
         coef = 1 + np.log(1 - occ) / 4
         self.bounds[1] = (0.5 * gp_bound, 1.5 * gp_bound)
         self.bounds[2] = (0.5 * coef * sigma_bound, 3 * coef * sigma_bound)
+        # self.bounds[3] = (0, None)
 
 
 # ======================
