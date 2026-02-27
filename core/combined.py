@@ -263,6 +263,11 @@ class CombinedFitter:
         self.bic = -2 * self.likelihood + self.dof * np.log(self.n_data)
         self.aic = -2 * self.likelihood + 2 * self.dof
 
+        self._minimizer = m
+        self.corr = np.array(
+            [[m.Correlation(i, j) for j in range(self.dof)] for i in range(self.dof)]
+        )
+
         print(f"\n[INFO] Converged: {self.converged}", flush=True)
         print(f"[INFO] Log-likelihood: {self.likelihood:.6f}", flush=True)
         print(f"[INFO] n_data: {self.n_data}, n_params: {self.dof}", flush=True)
@@ -331,6 +336,14 @@ class CombinedFitter:
         if errors is not None:
             self.ser_args = params[self._ser_slice]
             self.ser_args_std = errors[self._ser_slice]
+
+            s = self._ser_slice
+            self.spe_corr = np.array(
+                [
+                    [self._minimizer.Correlation(i, j) for j in range(s.start, s.stop)]
+                    for i in range(s.start, s.stop)
+                ]
+            )
 
             ref = self.fitters[0]
             self.gps = ref.get_gain(self.ser_args, "gp")
