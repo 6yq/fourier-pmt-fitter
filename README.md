@@ -1,227 +1,175 @@
-# PMT-Fourier-Fitter
+# fourier-fitter
 
-A modular and customizable PMT (Photomultiplier Tube) charge spectrum fitter based on FFT-based convolution.
+A PMT charge spectrum fitter built on JAX.  The spectrum model is
+assembled analytically in the Fourier domain, the likelihood is an
+extended Poisson (binned or unbinned), and the maximization runs
+L-BFGS-B on exact JAX gradients with Hessian-based errors.
 
-This package is designed to model and fit PMT charge spectra by simulating the convolution of single photoelectron (PE) responses with Poisson-distributed occupancies using FFT, allowing for detailed error propagation, posterior sampling, and highly customizable physical modeling.
+Inspired by Kalousis's fitter (https://github.com/kalousis/PMTCalib/)
+and sharing its core architecture with the SiPM charge fitter used by
+the TAO reconstruction chain.
 
-This work is inspired by Kalousis's fitter [here](https://github.com/kalousis/PMTCalib/).
+## Model
 
----
+The number of photoelectrons per trigger is Poisson(lam).  A single PE
+leaves charge with characteristic function f(w) (the SER model), which
+may include a discrete probability mass p0 at exactly zero charge
+(compound SER models).  The total PE charge spectrum in Fourier space is
 
-## 🔧 Features
+    pgf(f(w); lam) = exp(lam * (f(w) - 1))
 
-- **Customizable physical models**: define your own PE response shapes
-- **FFT-based convolution**: accurate and efficient modeling of nPE spectra
-- **Supports complex models**: pedestal, compound response, δ-like peak, etc.
-- **Constraint handling**: support for bounds and linear constraints
-- **Multi optimizer**: support for `pyROOT` and `emcee`
+Four readout settings are supported, in any combination:
 
----
+1. Pedestal on (whole spectrum): every trigger is recorded and the
+   Gaussian pedestal noise g0 is convolved in,
 
-## 📦 Installation
+       G(w) = g0(w) * exp(lam * (f(w) - 1))
 
-Clone and install locally:
+2. Pedestal off (PE spectrum): only non-zero charges are histogrammed.
+   Total charge is exactly zero when every PE leaves zero charge, with
+   probability pgf(p0) (the n = 0 term gives exp(-lam)), so the
+   recorded continuous density is
 
-```
-git clone https://github.com/6yq/fourier-pmt-fitter
-cd fourier-fitter
-pip install .
-```
+       G_c(w) = exp(lam * (f(w) - 1)) - exp(lam * (p0 - 1))
 
----
+3. Threshold on: a hardware discriminator multiplies the recorded
+   density by an efficiency eff(q) in charge space ("erf" or
+   "logistic", two parameters: location and scale).
 
-## 📚 Dependencies
+4. Pedestal and threshold together.
 
-This package requires:
+All settings share one bookkeeping rule: with A total triggers and
+P_obs the probability of landing in the histogram window (after the
+efficiency), the zero category (undetected, below threshold, or out of
+window) has probability 1 - P_obs and enters the extended-Poisson
+log-likelihood as an extra bin:
 
-```
-numpy
-scipy
-```
+    log L = sum_k [ n_k log(A y_k) - A y_k ]
+          + n_0 log(A (1 - P_obs)) - A (1 - P_obs) - log C
 
-They will be automatically installed via `pip`.
+Without a threshold the bin integrals of G are computed analytically in
+Fourier space (one matrix product over all bin edges).  With a
+threshold, G(q) * eff(q) is evaluated by IFFT on a sub-sampled grid
+aligned with the bin edges and integrated per bin with a composite
+Simpson rule.  In unbinned mode the density at each recorded charge is
+evaluated by a type-2 NUFFT, no binning involved.
 
-You might also need these packages:
+## Models
 
-```
-pyROOT (if you want to use `Minuit` optimizer)
-emcee (if you want to use `emcee` optimizer)
-```
+Gaussian family (`models/gauss.py`):
 
----
+| Class | SER | Parameters |
+|---|---|---|
+| `GaussFitter` | single Gaussian | mean, sigma |
+| `BiGaussFitter` | normal + missing-first-dynode | ratio, mean, sigma, mean_r, sigma_r |
+| `LinearGaussFitter` | normal + scaled-down copy | df, ds, mean, sigma |
+| `TriGaussFitter` | three Gaussians, stick-breaking weights | v1, v2, m1, d12, d23, s1, s2, s3 |
+| `GaussCompoundFitter` | Gaussian + compound Poisson of Gaussians | frac, mean, sigma, lam_c, mean_ts, sigma_ts |
 
-## 🛠 File Structure
+Polya family (`models/polya.py`):
 
-```
-fourier-fitter/
-├── __init__.py
-├── core                # Core fitter logic (base class)
-│   ├── __init__.py
-│   ├── base.py         # Base class
-│   ├── fft_utils.py    # FFT-based convolution
-│   └── utils.py        # Helper functions
-├── models              # PMT charge models
-│   ├── __init__.py
-│   ├── dynode.py       # dynode PMT fitter goes here
-│   ├── mcp.py          # MCP PMT fitter goes here
-|   |── polya_exp.py    # Polya-exponential fitter goes here
-│   └── tweedie_pdf.py  # Helper function for MCP's Gamma-Tweedie model
-├── README.md
-└── setup.py            # Package metadata  
-```
+| Class | SER | Parameters |
+|---|---|---|
+| `PolyaFitter` | single Gamma | mean, sigma |
+| `BiPolyaFitter` | Gamma + missing-first-dynode Gamma | frac, mean, sigma, mean_t, sigma_t |
+| `PolyaExpFitter` | Gamma + exponential | frac, mean, sigma, exp_scale |
+| `GammaTweedieFitter` | Gamma + compound Poisson of Gammas | frac, mean, sigma, lam_c, mean_t, sigma_t |
+| `RecursivePolyaFitter` | MCP recursive secondary emission (Lambert-W) | frac, mean, sigma, lam, lam_r, mean_r, sigma_r |
 
----
+The compound and recursive models carry a discrete mass at zero charge;
+it is handled exactly through `p0` (see Model above).  Every fitter
+exposes `get_gain(spe, "gm"/"gp")` and `spe_report(spe)`.
 
-## 🚀 Basic Usage
-
-### 🔧 Quick Fit
-
-```python
-from pmt_fitter import MCP_Fitter
-
-# Get histogram
-hist, bins = np.histogram(charge_data, bins=..., range=...)
-
-# Fit using auto-init (detects peaks automatically)
-fitter = MCP_Fitter(hist, bins, auto_init=True)
-# Use Minuit by default
-fitter.fit(method="minuit")
-
-# Access results
-print(fitter.occ, fitter.occ_std)
-print(fitter.ped_args, fitter.ped_args_std)
-print(fitter.ser_args, fitter.ser_args_std)
-print(fitter.chi_sq, fitter.ndf)
-print(fitter.gp, fitter.gm)
-print(fitter.likelihood)
-```
-
-**Note**:
-- If `isWholeSpectrum=True`, the pedestal will be automatically modeled as a Gaussian and its parameters occupy the first two slots in the parameter array.
-- If `isWholeSpectrum=False`, you might need threshold effect by giving `threshold="erf"` or `threshold="logistic"`.
-- The `fit()` method using `Minuit` is much faster.
-- The `fit()` method using MCMC (`emcee`) stores samples from the posterior distribution. You can extract full trace via `samples_track` or `log_l_track`.
-
-#### 🔍 Checking MCMC Convergence
+## Usage
 
 ```python
-import matplotlib.pyplot as plt
-log_l_track = np.array(fitter.log_l_track)
+import numpy as np
+from fourier_fitter import PolyaFitter, GaussFitter, CombinedFitter
 
-for i in range(log_l_track.shape[1]):
-    plt.plot(log_l_track[100:, i])  # discard burn-in if needed
+# PE spectrum (pedestal subtracted), unbinned fit.
+# A is the total trigger count including zero-PE events.
+f = PolyaFitter(Q_raw=charges, A=n_triggers)
+res = f.fit_mle()
 
-plt.xscale("log")
-plt.xlabel("Step")
-plt.ylabel("Log Likelihood")
-plt.title("MCMC chain stability")
-plt.show()
+print(res.converged, res.logl)
+print(dict(zip(f.param_names, res.theta)))
+spe, spe_err = res.block("spe")
+print(f.get_gain(spe), f.occupancy(res.theta))
+
+# Whole spectrum with pedestal, from a histogram.
+hist, bins = np.histogram(charges, bins=200)
+f = GaussFitter(hist=hist, bins=bins, pedestal=True)
+res = f.fit_mle()
+
+# PE spectrum with a hardware threshold.
+f = GaussFitter(hist=hist, bins=bins, A=n_triggers, threshold="erf")
+res = f.fit_mle()
+
+# Joint fit of several intensities with shared SER (one lam each).
+fitters = [PolyaFitter(hist=h, bins=b, A=n) for h, b, n in runs]
+res = CombinedFitter(fitters).fit_mle()
+spe, spe_err = res.spe()
+lams, lam_errs = res.lams()
 ```
 
----
+Initial values and bounds are derived from the data (occupancy from the
+zero fraction, SPE charge scale from the spectrum mean, pedestal from
+the tallest peak or the histogram left edge).  Pass `extra_block`,
+`thres_block`, `spe_block` (`ParamBlock`) or `lam_init` / `scale` to
+override.  Plotting helpers: `estimate_density`, `estimate_bin_counts`,
+`estimate_component_counts(theta, n)` for the n-PE decomposition.
 
-## 🧩 Custom Model Design
+`fit_mle` runs a small curated multi-start when a threshold is enabled
+(the truncated pedestal and the efficiency curve can trade against each
+other and create separate likelihood basins); the best final likelihood
+wins.
 
-To use a custom PE model, subclass `PMT_Fitter` and override the following:
+## Custom models
 
-- `_pdf(self, args)` – returns the single-PE PDF given model parameters
-- `get_gain(self, args)` – estimate gain
-- (optional) `const()` – for δ-like models (e.g., Tweedie)
-- `_replace_spe_params()` and `_replace_spe_bounds()` – for `auto_init=True` support
+Subclass `PMTSpectrumFitter` and provide:
 
-### ✅ Example: Custom Gamma Model
+- `_model_callables()` returning `(ser_ft, p0_fn, count_pgf)`;
+  `ser_ft(freq, spe)` is the SER characteristic function under the
+  numpy.fft sign convention (a Gaussian is
+  `exp(-1j * mean * freq - sigma**2 * freq**2 / 2)`), including any
+  discrete mass at zero.  `p0_fn(spe)` returns that mass (or None for
+  0).  `count_pgf` may be None (Poisson).
+- `_default_spe_block()` returning a `ParamBlock`; `self.scale` holds
+  the data-driven SPE charge scale.
+- `get_gain(spe, kind)` and `spe_report(spe)`.
 
-```python
-from pmt_fitter import PMT_Fitter
-from scipy.stats import gamma
+## File structure
 
-class Custom_PMT_Fitter(PMT_Fitter):
-    def __init__(
-        self,
-        hist,
-        bins,
-        isWholeSpectrum=False,
-        A=None,
-        occ_init=None,
-        sample=None,
-        seterr="warn",
-        init=[5.0, 1.0],  # e.g., mean and sigma for Gamma
-        bounds=[(0, None), (0, None)],
-        constraints=[
-            {"coeffs": [(1, 1), (2, -1)], "threshold": 0, "op": ">"},
-        ],  # ensure a peak
-        threshold=None, # 
-        auto_init=False,
-    ):
-        super().__init__(
-            hist,
-            bins,
-            A,
-            occ_init,
-            sample,
-            seterr,
-            init,
-            bounds,
-            constraints,
-            auto_init,
-        )
-
-    def _pdf(self, args):
-        mean, sigma = args
-        k = (mean / sigma) ** 2
-        theta = mean / k
-        return gamma.pdf(self.xsp, a=k, scale=theta)
-
-    def get_gain(self, args, gain: str = "gm"):
-        mean, sigma = args
-        k = (mean / sigma) ** 2
-        theta = mean / k
-        if gain == "gp":
-            return (k - 1) * theta
-        elif gain == "gm":
-            return mean
-        else:
-            raise NameError(f"{gain} is not a legal parameter!")
-
-    # different models have different acceptable parameter regions
-    # Caution: if `auto_init=True`, the initial values are always mean and std of the peaks
-    def _replace_spe_params(self, gp_init, sigma_init):
-        self._init[0] = gp_init
-        self._init[1] = sigma_init
-
-    def _replace_spe_bounds(self, gp_bound, sigma_bound):
-        gp_bound_ = (0.5 * gp_bound, 1.5 * gp_bound)
-        sigma_bound_ = (0.05 * sigma_bound, 3 * sigma_bound)
-        self.bounds[0] = gp_bound_
-        self.bounds[1] = sigma_bound_
-
-    # Only necessary if SPE response contains δ component.
-    # You might want to give the proportion here.
-    def _const(self, args):
-        return 0
+```
+fourier_fitter/
+├── core/
+│   ├── fft_grid.py     # uniform FFT grid aligned with bin edges
+│   ├── likelihood.py   # spectrum assembly, bin integrals, log-likelihoods
+│   ├── lambert_w.py    # JAX Lambert-W (recursive MCP model)
+│   ├── base.py         # PMTSpectrumFitter (blocks, MLE, accessors)
+│   └── combined.py     # joint multi-spectrum fitter
+├── models/
+│   ├── gauss.py        # Gaussian family
+│   └── polya.py        # Polya family
+└── tests/              # pytest suite (toy MC closure for all settings)
 ```
 
-## 📏 Chi-Square Calculation
+## Dependencies
 
-You might want to go through `core/utils.py` to see the pre-defined chi-square functions:
+numpy, scipy, jax.  Unbinned mode additionally needs jax-finufft.
 
-| Function | Description | Fomula |
-| --- | --- | --- |
-| `modified_neyman_chi2_A` | Modified Neyman chi-square (A) | $E^O / O - O$ |
-| `modified_neyman_chi2_B` | Modified Neyman chi-square (B) | $(E - O)^2 / O$
-| `mighell_chi2` | Mighell chi-square | $(E + 1 - O) ^ 2 / (O + 1)$ |
-| `merged_pearson_chi2` | Merged Pearson chi-square | $(E - O)^2 / E (E \ge 5)$ |
+## Tests
 
----
+```
+python -m pytest fourier_fitter/tests
+```
 
-## ⚠ Tips and Cautions
+The suite covers grid alignment, Lambert-W accuracy on its physical
+domain, characteristic functions against toy MC samplers, both bin
+integration paths, and full closure fits for the four readout settings,
+the zero-mass model and the combined fit.
 
-- If using `auto_init=True`, the initial parameters are estimated from histogram peak shape using `compute_init()`. If your model uses different parameterization, be sure to map mean/std properly.
+## Contact
 
----
-
-## 📩 Contact
-
-Maintainer: Yiqi Liu  
+Maintainer: Yiqi Liu
 Email: liuyiqi24@mails.tsinghua.edu.cn
-

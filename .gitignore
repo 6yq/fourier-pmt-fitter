@@ -4,3 +4,7 @@ __pycache__/
 *.pq
 *.pdf
 *.ipynb
+
+# local data and scratch
+shiqiang/
+colors.py
