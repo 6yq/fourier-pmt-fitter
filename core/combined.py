@@ -1,358 +1,253 @@
+# ===========================================================================
 # core/combined.py
+#
+# Joint fitter for multiple PMT spectra sharing one set of pedestal
+# (extra), threshold (thres) and SER (spe) parameters; one log_A and one
+# lam per spectrum.  Typical use: the same PMT channel measured at
+# several light intensities.
+#
+# Combined parameter vector layout:
+#   theta = [log_A_0, ..., log_A_{N-1},   <- per-spectrum
+#            extra..., thres..., spe...,  <- shared
+#            lam_0,   ..., lam_{N-1}]     <- per-spectrum
+#
+# All fitters must share the same block dimensions and settings; shared
+# initial values are taken from fitters[0].
+# ===========================================================================
+
 from __future__ import annotations
 
+import jax
 import numpy as np
-from dataclasses import dataclass
-from typing import List, Sequence, Tuple, Optional
-from contextlib import contextmanager
+import jax.numpy as jnp
 
-from scipy.fft import fft
-from .fft_utils import roll_and_pad
+from typing import List
+from scipy.optimize import minimize
+from dataclasses import dataclass
+
+from .base import PMTSpectrumFitter
+
+
+# ==============================
+#     Combined fit result
+# ==============================
 
 
 @dataclass
-class Spec:
-    """Specification for a single spectrum included in the combined fit.
+class CombinedFitResult:
+    converged: bool
+    theta: np.ndarray
+    theta_err: np.ndarray
+    logl: float
+    n_iter: int
+    message: str
+    logA_idx: List[int]
+    extra_sl: slice
+    thres_sl: slice
+    spe_sl: slice
+    lam_idx: List[int]
 
-    Parameters
-    ----------
-    fitter : object
-        An instance of your PMT_Fitter (or subclass). It must expose:
-          - .init (np.ndarray)
-          - .bounds (tuple of (lo, hi))
-          - .log_l(args: np.ndarray) -> float
-          - ._start_idx  (0 if no pedestal/threshold; 2 otherwise)
-          - ._ser_pdf_time(args)      (time-domain SER PDF on .xsp)
-          - grid attributes: .xsp, ._xsp_width, ._pad_safe, ._shift
-    share_ser : bool, default True
-        If True, this spectrum uses the shared [additional + SER] parameter block.
-        If False, this spectrum has its own local SER parameters (rare).
-    use_scale_axis : bool, default False
-        If True, add a per-spectrum axis scaling s = exp(log_s) applied to the
-        *shared* SER shape via p_s(x) = (1/s) * p(x/s). This is robust across
-        PMT types because it does not depend on any particular "gain index".
-    weight : float, default 1.0
-        Optional weight in the summed log-likelihood.
-    """
+    def log_As(self):
+        return self.theta[self.logA_idx], self.theta_err[self.logA_idx]
 
-    fitter: object
-    share_ser: bool = True
-    use_scale_axis: bool = False
-    weight: float = 1.0
+    def extra(self):
+        return self.theta[self.extra_sl], self.theta_err[self.extra_sl]
+
+    def thres(self):
+        return self.theta[self.thres_sl], self.theta_err[self.thres_sl]
+
+    def spe(self):
+        return self.theta[self.spe_sl], self.theta_err[self.spe_sl]
+
+    def lams(self):
+        return self.theta[self.lam_idx], self.theta_err[self.lam_idx]
+
+
+# ==============================
+#     CombinedFitter
+# ==============================
 
 
 class CombinedFitter:
-    """Combine multiple spectra (different classes / bins) into a joint fit.
+    """Joint MLE for multiple spectra with shared extra + thres + spe.
 
-    Global parameter vector layout:
-        theta = [ shared_additional..., shared_SER...,  (log_s1?) occ1,  (log_s2?) occ2, ...]
-    where:
-        - shared_additional are pedestal/threshold params (length = _start_idx: 0 or 2)
-        - shared_SER are SER params (excluding occupancy)
-        - each spectrum optionally adds log_s if use_scale_axis=True (s = exp(log_s))
-        - each spectrum has its own occupancy occ in (0, 1)
-
-    Notes
-    -----
-    1) All spectra must agree on pedestal/threshold usage: identical _start_idx.
-    2) For share_ser=True spectra, SER dimensionality must be identical to be shareable.
-    3) Axis scaling is implemented by *time-domain resampling*:
-           p_s(x) = (1/s) * p(x/s),
-       evaluated on the spectrum's existing .xsp grid, then fed into your
-       standard FFT pipeline (roll_and_pad -> FFT). No need to change ._freq or ._xsp_width.
+    Parameters
+    ----------
+    fitters : list of PMTSpectrumFitter
+        Constructed fitters.  All must have identical pedestal/threshold
+        settings and block dimensions; shared init values come from
+        fitters[0].
     """
 
-    # -------------------------
-    #      Initialization
-    # -------------------------
-    def __init__(
-        self,
-        specs: List[Spec],
-        ref_idx: int = 0,
-        init_override: Optional[np.ndarray] = None,
-        bounds_override: Optional[
-            Sequence[Tuple[Optional[float], Optional[float]]]
-        ] = None,
-    ):
-        self.specs = specs
-        self.ref_idx = ref_idx
-        self.init_override = init_override
-        self.bounds_override = bounds_override
+    def __init__(self, fitters: List[PMTSpectrumFitter]):
+        if not fitters:
+            raise ValueError("At least one fitter required.")
+        self.fitters = fitters
+        self.n_spectra = len(fitters)
+        self._validate()
+        self._build()
 
-        if not specs:
-            raise ValueError("At least one spectrum (Spec) is required.")
+    def _validate(self):
+        ref = self.fitters[0]
+        for i, f in enumerate(self.fitters[1:], 1):
+            if f.pedestal != ref.pedestal or f.threshold != ref.threshold:
+                raise ValueError(f"Fitter {i}: pedestal/threshold settings differ.")
+            for blk in ("extra", "thres", "spe"):
+                if (f.layout[blk].stop - f.layout[blk].start) != (
+                    ref.layout[blk].stop - ref.layout[blk].start
+                ):
+                    raise ValueError(f"Fitter {i}: {blk} block dimension differs.")
 
-        # 1) Enforce identical pedestal/threshold usage across spectra
-        start_idxs = [sp.fitter._start_idx for sp in specs]
-        if len(set(start_idxs)) != 1:
-            raise ValueError(
-                "All spectra must have identical _start_idx (pedestal/threshold usage)."
-            )
-        self._addl_len = start_idxs[0]  # 0 or 2
+    def _build(self):
+        ref = self.fitters[0]
+        n = self.n_spectra
+        ly = ref.layout
+        n_extra = ly["extra"].stop - ly["extra"].start
+        n_thres = ly["thres"].stop - ly["thres"].start
+        n_spe = ly["spe"].stop - ly["spe"].start
+        n_shared = n_extra + n_thres + n_spe
 
-        # 2) SER dimensionality and shareability
-        ser_dims = [len(sp.fitter.init[sp.fitter._start_idx : -1]) for sp in specs]
-        self._ser_dims = ser_dims
+        self.logA_idx = list(range(n))
+        self.extra_sl = slice(n, n + n_extra)
+        self.thres_sl = slice(n + n_extra, n + n_extra + n_thres)
+        self.spe_sl = slice(n + n_extra + n_thres, n + n_shared)
+        self.lam_idx = list(range(n + n_shared, 2 * n + n_shared))
 
-        shared_dims = {d for d, sp in zip(ser_dims, specs) if sp.share_ser}
-        if len(shared_dims) > 1:
-            raise ValueError(
-                "Shared SER requires identical SER dimension for all share_ser=True spectra."
-            )
-        self._shared_ser_dim = shared_dims.pop() if shared_dims else 0
+        init_parts, bounds_parts = [], []
+        for f in self.fitters:
+            init_parts.append(f.init[ly["log_A"]])
+            bounds_parts.extend(f.bounds[ly["log_A"].start : ly["log_A"].stop])
+        for blk in ("extra", "thres", "spe"):
+            init_parts.append(ref.init[ly[blk]])
+            bounds_parts.extend(ref.bounds[ly[blk].start : ly[blk].stop])
+        for f in self.fitters:
+            init_parts.append(f.init[ly["lam"]])
+            bounds_parts.extend(f.bounds[ly["lam"].start : ly["lam"].stop])
 
-        # 3) Build shared [additional + SER] block from reference spectrum (or overrides)
-        ref = specs[ref_idx].fitter
-        shared_addl0 = ref.init[: self._addl_len] if self._addl_len else np.array([])
-        shared_addl_b = list(ref.bounds[: self._addl_len]) if self._addl_len else []
+        self.init = np.concatenate(init_parts)
+        self.bounds = bounds_parts
+        self.dof = len(self.init)
+        self._layout_ref = ly
 
-        shared_ser0 = (
-            ref.init[ref._start_idx : -1][: self._shared_ser_dim]
-            if self._shared_ser_dim
-            else np.array([])
-        )
-        shared_ser_b = (
-            list(ref.bounds[ref._start_idx : -1])[: self._shared_ser_dim]
-            if self._shared_ser_dim
-            else []
-        )
+    # ==============================
+    #     Local theta reconstruction
+    # ==============================
 
-        # Optional user overrides on the shared head [additional..., SER...]
-        if init_override is not None:
-            expect = len(shared_addl0) + len(shared_ser0)
-            if len(init_override) != expect:
-                raise ValueError(
-                    f"init_override length {len(init_override)} != expected {expect}"
-                )
-            shared_addl0 = init_override[: len(shared_addl0)]
-            shared_ser0 = init_override[len(shared_addl0) :]
-
-        if bounds_override is not None:
-            expect = len(shared_addl_b) + len(shared_ser_b)
-            if len(bounds_override) != expect:
-                raise ValueError(
-                    f"bounds_override length {len(bounds_override)} != expected {expect}"
-                )
-            shared_addl_b = list(bounds_override[: len(shared_addl_b)])
-            shared_ser_b = list(bounds_override[len(shared_addl_b) :])
-
-        # 4) Assemble global theta and per-spectrum layout
-        theta_parts = []
-        bounds_parts: List[Tuple[Optional[float], Optional[float]]] = []
-
-        # Shared head at the front
-        theta_parts.append(shared_addl0)
-        bounds_parts.extend(shared_addl_b)
-        theta_parts.append(shared_ser0)
-        bounds_parts.extend(shared_ser_b)
-
-        cursor = sum(map(len, theta_parts))
-        self._shared_addl_slice = slice(0, len(shared_addl0))
-        self._shared_ser_slice = slice(
-            self._shared_addl_slice.stop,
-            self._shared_addl_slice.stop + len(shared_ser0),
+    def local_theta(self, theta, i):
+        """Return fitter i's individual theta from the combined theta."""
+        xp = jnp if isinstance(theta, jnp.ndarray) else np
+        return xp.concatenate(
+            [
+                theta[self.logA_idx[i] : self.logA_idx[i] + 1],
+                theta[self.extra_sl],
+                theta[self.thres_sl],
+                theta[self.spe_sl],
+                theta[self.lam_idx[i] : self.lam_idx[i] + 1],
+            ]
         )
 
-        self._layout = []  # one dict per spectrum
-        for sp, d in zip(specs, ser_dims):
-            f = sp.fitter
+    # ==============================
+    #     Joint log-likelihood
+    # ==============================
 
-            # Local SER block only if not shared
-            if sp.share_ser:
-                local_ser_slice = slice(0, 0)  # empty
-            else:
-                local_ser0 = f.init[f._start_idx : -1]
-                theta_parts.append(local_ser0)
-                bounds_parts.extend(list(f.bounds[f._start_idx : -1]))
-                local_ser_slice = slice(cursor, cursor + len(local_ser0))
-                cursor += len(local_ser0)
-
-            # Optional per-spectrum axis scaling parameter log_s (unbounded)
-            if sp.use_scale_axis and sp.share_ser:
-                log_s_index = cursor
-                theta_parts.append(np.array([0.0]))  # init: log_s=0 => s=1
-                bounds_parts.append((None, None))
-                cursor += 1
-            else:
-                log_s_index = None
-
-            # Occupancy
-            occ_index = cursor
-            theta_parts.append(np.array([f.init[-1]]))
-            bounds_parts.append((0.0, 1.0))
-            cursor += 1
-
-            self._layout.append(
-                dict(
-                    local_ser_slice=local_ser_slice,
-                    log_s_index=log_s_index,
-                    occ_index=occ_index,
-                    ser_dim=d,
-                    share_ser=sp.share_ser,
-                    use_scale_axis=sp.use_scale_axis,
-                )
-            )
-
-        self.theta0 = np.concatenate(theta_parts) if theta_parts else np.array([])
-        self.bounds = tuple(bounds_parts)
-
-        # Keep original hooks to be safe if you ever need them later
-        self._orig_ser_pdf = [sp.fitter._ser_pdf_time for sp in specs]
-
-    # -------------------------
-    #   Utility: temp patcher
-    # -------------------------
-    @contextmanager
-    def _temporary_patch(self, obj, attr: str, new_callable):
-        """Temporarily replace `obj.attr` with `new_callable`, then restore."""
-        old = getattr(obj, attr)
-        setattr(obj, attr, new_callable)
-        try:
-            yield
-        finally:
-            setattr(obj, attr, old)
-
-    # -------------------------
-    #   Axis scaling (time domain)
-    # -------------------------
-    def _make_scaled_ser_to_ft(self, sp_idx: int, s: float):
-        """Return a _ser_to_ft(ser_args) applying axis scaling by s>0.
-
-        Prefer analytic FT if available: P_s(ω) = P(ω s).
-        Otherwise fall back to time-domain resampling:
-            p_s(x) = (1/s) * p(x/s)
-        evaluated on the fitter's own x-grid (.xsp), then roll+pad+FFT.
-        """
-        f = self.specs[sp_idx].fitter
-        orig_ser_pdf = self._orig_ser_pdf[sp_idx]
-
-        # guard
-        s = float(max(s, 1e-8))
-
-        def ser_to_ft_scaled(ser_args: np.ndarray):
-            # --- Try analytic FT first
-            ft = f._ser_ft(f._freq * s, ser_args)
-            if ft is not None:
-                return ft
-
-            # --- Fallback: time-domain resampling with Jacobian 1/s
-            pdf_base = orig_ser_pdf(ser_args)  # on f.xsp
-            x = f.xsp
-            pdf_scaled = (1.0 / s) * np.interp(x / s, x, pdf_base, left=0.0, right=0.0)
-
-            pdf_padded, _, _ = roll_and_pad(pdf_scaled, f._shift, f._pad_safe)
-            return fft(pdf_padded) * f._xsp_width
-
-        return ser_to_ft_scaled
-
-    # -------------------------
-    #    Build local args
-    # -------------------------
-    def _args_for(self, theta: np.ndarray, i: int) -> np.ndarray:
-        """Assemble local args for spectrum i as the fitter expects: [additional, SER, occ]."""
-        f = self.specs[i].fitter
-        lay = self._layout[i]
-
-        # Shared head
-        addl = theta[self._shared_addl_slice]
-        shared_ser = theta[self._shared_ser_slice]
-
-        # SER choice
-        ser = shared_ser if lay["share_ser"] else theta[lay["local_ser_slice"]]
-
-        # Occupancy
-        occ = np.array([theta[lay["occ_index"]]])
-
-        return np.r_[addl, ser, occ] if self._addl_len else np.r_[ser, occ]
-
-    # -------------------------
-    #   Joint log-likelihood
-    # -------------------------
-    def log_l(self, theta: np.ndarray) -> float:
-        total = 0.0
-        for i, sp in enumerate(self.specs):
-            f = sp.fitter
-            lay = self._layout[i]
-
-            if lay["use_scale_axis"] and lay["share_ser"]:
-                log_s = theta[lay["log_s_index"]]
-                s = float(np.exp(log_s))
-                ser_to_ft = self._make_scaled_ser_to_ft(i, s)
-                # temporarily patch this fitter's _ser_to_ft to the scaled version
-                with self._temporary_patch(f, "_ser_to_ft", ser_to_ft):
-                    args_i = self._args_for(theta, i)
-                    total += sp.weight * f.log_l(args_i)
-            else:
-                args_i = self._args_for(theta, i)
-                total += sp.weight * f.log_l(args_i)
-
+    def _logl_combined(self, theta: jnp.ndarray) -> jnp.ndarray:
+        total = jnp.zeros(())
+        for i, f in enumerate(self.fitters):
+            total = total + f._logl_from_theta(self.local_theta(theta, i))
         return total
 
-    # -------------------------
-    #  Fitting API (reuses host)
-    # -------------------------
-    def fit_minuit(self, host_idx: int = 0, **kwargs):
-        """Use one fitter as host and call its existing `.fit(method="minuit")`.
+    def logl(self, theta):
+        return float(self._logl_combined(jnp.asarray(theta, dtype=jnp.float64)))
 
-        We temporarily set on the host:
-          - .log_l  -> CombinedFitter.log_l
-          - .init   -> theta0
-          - .bounds -> combined bounds
-          - .dof    -> len(theta0)
+    # ===========
+    #     MLE
+    # ===========
+
+    def fit_mle(self, theta0=None, maxiter=1000, pg_tol=0.5) -> CombinedFitResult:
+        """Joint L-BFGS-B MLE; gradients assembled per fitter.
+
+        Like PMTSpectrumFitter.fit_mle, the fit is also accepted when the
+        scaled projected gradient falls below pg_tol (line searches can
+        fail on float noise at the optimum).
         """
-        host = self.specs[host_idx].fitter
-        # backup
-        _logl, _init, _bounds, _dof = host.log_l, host.init, host.bounds, host.dof
-        try:
-            host.log_l = self.log_l
-            host.init = self.theta0.copy()
-            host.bounds = self.bounds
-            host.dof = len(host.init)
-            host.fit(method="minuit", **kwargs)
-        finally:
-            host.log_l, host.init, host.bounds, host.dof = _logl, _init, _bounds, _dof
+        if theta0 is None:
+            theta0 = self.init.copy()
+        theta0 = np.asarray(theta0, dtype=np.float64)
 
-    def fit_mcmc(
-        self, host_idx: int = 0, step_length: Optional[np.ndarray] = None, **kwargs
-    ):
-        """Same as fit_minuit but call the existing MCMC driver on the host."""
-        host = self.specs[host_idx].fitter
-        _logl, _init, _bounds, _dof = host.log_l, host.init, host.bounds, host.dof
-        try:
-            host.log_l = self.log_l
-            host.init = self.theta0.copy()
-            host.bounds = self.bounds
-            host.dof = len(host.init)
-            if step_length is None:
-                hi = host.init
-                step_length = np.maximum(np.abs(hi) * 0.05, 1e-3)
-            host._fit_mcmc(step_length=step_length, **kwargs)
-        finally:
-            host.log_l, host.init, host.bounds, host.dof = _logl, _init, _bounds, _dof
+        # JIT warm-up
+        th0 = jnp.asarray(theta0)
+        for i, f in enumerate(self.fitters):
+            f._logl_jit(self.local_theta(th0, i))
+            f._grad_jit(self.local_theta(th0, i))
 
-    # -------------------------
-    #  Convenience utilities
-    # -------------------------
-    def args_for(self, theta: np.ndarray, i: int) -> np.ndarray:
-        """Public wrapper of _args_for to retrieve per-spectrum args."""
-        return self._args_for(theta, i)
+        ly = self._layout_ref
 
-    def split_theta(self, theta: np.ndarray):
-        """Return a dict view of the global theta:
-        - 'shared_addl', 'shared_ser'
-        - 'locals': list of {'log_s'(optional), 'occ', 'local_ser'(optional)}
-        """
-        out = dict(
-            shared_addl=theta[self._shared_addl_slice],
-            shared_ser=theta[self._shared_ser_slice],
-            locals=[],
+        def neg_logl(x):
+            xj = jnp.asarray(x)
+            total = 0.0
+            for i, f in enumerate(self.fitters):
+                total += float(f._logl_jit(self.local_theta(xj, i)))
+            return -total
+
+        def neg_grad(x):
+            xj = jnp.asarray(x)
+            g = np.zeros_like(x)
+            for i, f in enumerate(self.fitters):
+                lg = np.asarray(f._grad_jit(self.local_theta(xj, i)))
+                g[self.logA_idx[i]] += lg[ly["log_A"].start]
+                g[self.extra_sl] += lg[ly["extra"]]
+                g[self.thres_sl] += lg[ly["thres"]]
+                g[self.spe_sl] += lg[ly["spe"]]
+                g[self.lam_idx[i]] += lg[ly["lam"].start]
+            return -g
+
+        res = minimize(
+            neg_logl,
+            theta0,
+            jac=neg_grad,
+            method="L-BFGS-B",
+            bounds=self.bounds,
+            options={"maxiter": maxiter},
         )
-        for lay in self._layout:
-            entry = {}
-            if lay["use_scale_axis"] and lay["share_ser"]:
-                entry["log_s"] = theta[lay["log_s_index"]]
-            entry["occ"] = theta[lay["occ_index"]]
-            if not lay["share_ser"]:
-                entry["local_ser"] = theta[lay["local_ser_slice"]]
-            out["locals"].append(entry)
-        return out
+
+        theta_hat = np.asarray(res.x, dtype=np.float64)
+        theta_err = self._hessian_errors(theta_hat)
+
+        converged = bool(res.success)
+        if not converged:
+            g = neg_grad(theta_hat)
+            pg = g.copy()
+            for j, (lo, hi) in enumerate(self.bounds):
+                if lo is not None and theta_hat[j] <= lo and g[j] > 0:
+                    pg[j] = 0.0
+                if hi is not None and theta_hat[j] >= hi and g[j] < 0:
+                    pg[j] = 0.0
+            converged = bool(
+                np.max(np.abs(pg) * np.maximum(np.abs(theta_hat), 1.0)) < pg_tol
+            )
+
+        return CombinedFitResult(
+            converged=converged,
+            theta=theta_hat,
+            theta_err=theta_err,
+            logl=-float(res.fun),
+            n_iter=int(res.nit),
+            message=str(res.message),
+            logA_idx=self.logA_idx,
+            extra_sl=self.extra_sl,
+            thres_sl=self.thres_sl,
+            spe_sl=self.spe_sl,
+            lam_idx=self.lam_idx,
+        )
+
+    def _hessian_errors(self, theta_hat):
+        try:
+            H = np.asarray(
+                jax.hessian(self._logl_combined)(jnp.asarray(theta_hat))
+            )
+            cov = -np.linalg.pinv(H, hermitian=True)
+            diag = np.diag(cov)
+            diag = np.where(diag > 0, diag, np.nan)
+            return np.sqrt(diag)
+        except Exception:
+            return np.full_like(theta_hat, np.nan)

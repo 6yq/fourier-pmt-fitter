@@ -1,12 +1,18 @@
 from setuptools import setup
 
 setup(
-    name="pmt-fitter",
-    version="1.1.1",
-    description="A PMT charge spectrum fitter using FFT-based convolution",
+    name="fourier-fitter",
+    version="2.0.0",
+    description="JAX-based PMT charge spectrum fitter with Fourier-domain models",
     author="Yiqi Liu",
     author_email="liuyiqi24@mails.tsinghua.edu.cn",
-    py_modules=["pmt_fitter", "tweedie_pdf"],
-    install_requires=["numpy", "scipy", "emcee"],
-    python_requires=">=3.9",
+    packages=[
+        "fourier_fitter",
+        "fourier_fitter.core",
+        "fourier_fitter.models",
+    ],
+    package_dir={"fourier_fitter": "."},
+    install_requires=["numpy", "scipy", "jax"],
+    extras_require={"unbinned": ["jax-finufft"]},
+    python_requires=">=3.10",
 )
