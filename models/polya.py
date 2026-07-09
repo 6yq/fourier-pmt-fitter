@@ -296,62 +296,68 @@ def _cascade_extinction(w, delta2):
     return jnp.real(_recursive_cascade_ft(jnp.zeros(()) * 1j, w, delta2))
 
 
-def _ser_ft_recursive(freq, spe):
-    w, Q1, s1, d1, d2, Q2, s2 = spe
-    g1 = ft_gamma(freq, *_k_theta(Q1, s1))
-    g2 = ft_gamma(freq, *_k_theta(Q2, s2))
-    s_cas = _recursive_cascade_ft(g2, w, d2)
-    p_s0 = _cascade_extinction(w, d2)
-    s_cas = (s_cas - p_s0) / (1.0 - p_s0)          # cascade | nonzero
-    f = w * g1 + (1.0 - w) * jnp.exp(d1 * (s_cas - 1.0))
-    w0 = jnp.exp(-d1)                               # Poisson(0, delta1)
-    return (f - (1.0 - w) * w0) / (1.0 - (1.0 - w) * w0)   # PE | detected
+def _kernel_gamma(freq, mean, sigma):
+    return ft_gamma(freq, *_k_theta(mean, sigma))
 
 
-# kup-gain laser.yaml mcp/kGammaRecursive limits are in gain units; our
-# charge is ADC*ns with 1 gain unit = 666.67 ADC*ns (user convention).
-_REC_SCALE = 666.67
+def _kernel_gauss(freq, mean, sigma):
+    return jnp.exp(-1j * mean * freq - 0.5 * (sigma * freq) ** 2)
 
 
-class RecursivePolyaFitter(PMTSpectrumFitter):
-    """Official (kup-gain kGammaRecursive) recursive model for MCP PMTs.
+def _make_ser_ft_recursive(kernel):
+    def ser_ft(freq, spe):
+        w, Q1, s1, d1, d2, Q2, s2 = spe
+        g1 = kernel(freq, Q1, s1)
+        g2 = kernel(freq, Q2, s2)
+        s_cas = _recursive_cascade_ft(g2, w, d2)
+        p_s0 = _cascade_extinction(w, d2)
+        s_cas = (s_cas - p_s0) / (1.0 - p_s0)      # cascade | nonzero
+        f = w * g1 + (1.0 - w) * jnp.exp(d1 * (s_cas - 1.0))
+        w0 = jnp.exp(-d1)                           # Poisson(0, delta1)
+        return (f - (1.0 - w) * w0) / (1.0 - (1.0 - w) * w0)  # PE | detected
 
-    spe = (w, Q1, sigma1, delta1, delta2, Q2, sigma2); Q/sigma in ADC*ns
-    (kup gain-unit limits x 666.67).  The SER is conditioned on nonzero
-    charge (zero atoms stripped + renormalized, as in TF1Qspec), so there
-    is no p0 and lam is the detected-PE intensity.
+    return ser_ft
+
+
+_ser_ft_recursive = _make_ser_ft_recursive(_kernel_gamma)
+_ser_ft_recursive_gauss = _make_ser_ft_recursive(_kernel_gauss)
+
+
+class _RecursiveBase(PMTSpectrumFitter):
+    """Official (kup-gain FFT_Recursive) recursive model for MCP PMTs.
+
+    spe = (w, Q1, sigma1, delta1, delta2, Q2, sigma2) in kup GAIN UNITS —
+    feed charge already normalized by the per-channel DB gain
+    (Q_raw / (adc_per_gainunit * meangain_ch)).  The SER is conditioned
+    on nonzero charge (zero atoms stripped + renormalized, as in
+    TF1Qspec), so there is no p0 and lam is the detected-PE intensity.
     """
 
+    _SER_FT = None       # set by subclass
+    _SPE_INIT = None     # kup laser.yaml init
+    _SPE_BOUNDS = None   # kup laser.yaml limits
+
     def _model_callables(self):
-        return _ser_ft_recursive, None, None
+        return type(self)._SER_FT, None, None
 
     def _default_spe_block(self):
-        s = _REC_SCALE
         return ParamBlock(
             name="spe",
             names=["w", "Q1", "sigma1", "delta1", "delta2", "Q2", "sigma2"],
-            init=np.array([0.4, 1.0 * s, 0.3 * s, 3.0, 1.0, 0.5 * s, 0.2 * s]),
-            bounds=[
-                (0.1, 0.8),
-                (0.4 * s, 2.0 * s),
-                (0.1 * s, 0.8 * s),
-                (1.0, 8.0),
-                (0.1, 5.0),
-                (0.05 * s, 0.7 * s),
-                (0.01 * s, 0.4 * s),
-            ],
+            init=np.array(self._SPE_INIT),
+            bounds=list(self._SPE_BOUNDS),
         )
 
     def get_gain(self, spe, kind="gm"):
         w, Q1, s1, d1, d2, Q2, _ = (float(v) for v in spe)
         if kind == "gp":
-            k, theta = _k_theta(Q1, s1)
-            return (k - 1.0) * theta
+            return Q1
         if kind == "gm":
             # mean of the detected-PE charge: -d Im[ser_ft]/df at f = 0
             spe_arr = jnp.asarray(spe, dtype=jnp.float64)
+            ser_ft = type(self)._SER_FT
             dspe = jax.grad(
-                lambda f: jnp.imag(_ser_ft_recursive(jnp.full((1,), f), spe_arr)[0])
+                lambda f: jnp.imag(ser_ft(jnp.full((1,), f), spe_arr)[0])
             )(0.0)
             return float(-dspe)
         raise ValueError(f"Unknown gain kind: {kind!r}")
@@ -371,3 +377,35 @@ class RecursivePolyaFitter(PMTSpectrumFitter):
             "subcritical": bool((1.0 - w) * d2 < 1.0),
             "gain": self.get_gain(spe, "gm"),
         }
+
+
+class RecursivePolyaFitter(_RecursiveBase):
+    """kup kGammaRecursive: Gamma direct + Gamma cascade quanta."""
+
+    _SER_FT = staticmethod(_ser_ft_recursive)
+    _SPE_INIT = [0.4, 1.0, 0.3, 3.0, 1.0, 0.5, 0.2]
+    _SPE_BOUNDS = [
+        (0.1, 0.8),     # w
+        (0.4, 2.0),     # Q1
+        (0.1, 0.8),     # sigma1
+        (1.0, 8.0),     # delta1
+        (0.1, 5.0),     # delta2
+        (0.05, 0.7),    # Q2
+        (0.01, 0.4),    # sigma2
+    ]
+
+
+class RecursiveGaussFitter(_RecursiveBase):
+    """kup kGaussRecursive (production default): Gauss direct + cascade."""
+
+    _SER_FT = staticmethod(_ser_ft_recursive_gauss)
+    _SPE_INIT = [0.4, 1.0, 0.3, 3.0, 1.0, 0.2, 0.2]
+    _SPE_BOUNDS = [
+        (0.1, 0.8),     # w
+        (0.4, 2.0),     # Q1
+        (0.1, 1.0),     # sigma1
+        (1.0, 8.0),     # delta1
+        (0.1, 3.0),     # delta2
+        (0.05, 1.0),    # Q2
+        (0.02, 1.0),    # sigma2
+    ]

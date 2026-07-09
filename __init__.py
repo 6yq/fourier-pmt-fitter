@@ -18,6 +18,7 @@ from .models import (
     PolyaExpFitter,
     GammaTweedieFitter,
     RecursivePolyaFitter,
+    RecursiveGaussFitter,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "PolyaExpFitter",
     "GammaTweedieFitter",
     "RecursivePolyaFitter",
+    "RecursiveGaussFitter",
 ]
