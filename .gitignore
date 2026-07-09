@@ -1,0 +1,10 @@
+__pycache__/
+
+*.h5
+*.pq
+*.pdf
+*.ipynb
+
+# local data and scratch
+shiqiang/
+colors.py
