@@ -1,0 +1,27 @@
+MC: 200000 events, fired 0.2511, pS=0.0299 -> lam_detected=0.2910 (1-exp(-lam)=0.2525)
+
+== full spectrum: converged=True logl=-522.0
+  w        fit    0.4057  truth    0.4000  (+1.4%)
+  Q1       fit    1.0101  truth    1.0000  (+1.0%)
+  sigma1   fit    0.3058  truth    0.3000  (+1.9%)
+  delta1   fit    2.9959  truth    3.0000  (-0.1%)
+  Q2       fit    0.3506  truth    0.3500  (+0.2%)
+  sigma2   fit    0.1538  truth    0.1500  (+2.5%)
+  lam      fit    0.2892  truth    0.2910 (-0.6%)
+  gain(gm) fit 1.0657
+  occupancy fit 0.2512  MC fired 0.2511
+  ZERO ATOM CHECK: est 149772  MC 149777  (-0.004%)
+  components (exactly n detected PEs):
+    n=1: peak fit   0.895  MC   0.895   counts fit  43314.7  MC  43226
+    n=2: peak fit   1.884  MC   1.678   counts fit   6264.3  MC   6342
+    n=3: peak fit   2.955  MC   2.873   counts fit    603.6  MC    605
+
+== truncated q >= 0.25: converged=True logl=-505.2
+  w        fit    0.4189  truth    0.4000  (+4.7%)
+  Q1       fit    1.0074  truth    1.0000  (+0.7%)
+  sigma1   fit    0.3102  truth    0.3000  (+3.4%)
+  delta1   fit    2.9578  truth    3.0000  (-1.4%)
+  Q2       fit    0.3581  truth    0.3500  (+2.3%)
+  sigma2   fit    0.1438  truth    0.1500  (-4.1%)
+
+saved /mnt/stage/liuyq/fsmp_commission/ridge/fitter/tests/out/mc_tweedie.pdf
