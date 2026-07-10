@@ -245,7 +245,7 @@ def make_bin_prob_fn(grid, spectrum_fn, efficiency, scheme="simpson"):
 
 
 def make_binned_logl(grid, spectrum_fn, efficiency=None, atom_fn=None,
-                     scheme="simpson"):
+                     scheme="simpson", use_zero=True):
     """Build a binned extended-Poisson log-likelihood closure.
 
     Returns logl(log_A, extra, thres, spe, lam) -> scalar.  ``extra`` and
@@ -286,6 +286,8 @@ def make_binned_logl(grid, spectrum_fn, efficiency=None, atom_fn=None,
         z_est = A * z_prob
 
         ll_bins = jnp.sum(hist * jnp.log(y_est) - y_est)
+        if not use_zero:
+            return ll_bins - log_C          # shape-only (kup-style, no zero term)
         ll_zero = zero * jnp.log(z_est) - z_est
         return ll_bins + ll_zero - log_C
 

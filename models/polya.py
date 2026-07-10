@@ -260,6 +260,67 @@ class GammaTweedieFitter(PMTSpectrumFitter):
         }
 
 
+def _ser_ft_gamma_tweedie_kup(freq, spe):
+    w, Q1, s1, d1, Q2, s2 = spe
+    g1 = ft_gamma(freq, *_k_theta(Q1, s1))
+    g2 = ft_gamma(freq, *_k_theta(Q2, s2))
+    f = w * g1 + (1.0 - w) * jnp.exp(d1 * (g2 - 1.0))
+    w0 = jnp.exp(-d1)
+    return (f - (1.0 - w) * w0) / (1.0 - (1.0 - w) * w0)   # PE | detected
+
+
+class GammaTweedieKupFitter(PMTSpectrumFitter):
+    """Tuning variant: GT with kup parameterization/boxes, atom stripped.
+
+    spe = (w, Q1, sigma1, delta1, Q2, sigma2), kup gain units.  With
+    probability 1 - w the PE charge is a Poisson(delta1) sum of small
+    Gammas(Q2, sigma2); the zero atom is stripped (kup convention).
+    Inits/limits identical to RecursivePolyaFitter (no delta2).
+    """
+
+    def _model_callables(self):
+        return _ser_ft_gamma_tweedie_kup, None, None
+
+    def _default_spe_block(self):
+        return ParamBlock(
+            name="spe",
+            names=["w", "Q1", "sigma1", "delta1", "Q2", "sigma2"],
+            init=np.array([0.4, 1.0, 0.3, 3.0, 0.5, 0.2]),
+            bounds=[
+                (0.1, 0.8),     # w
+                (0.4, 2.0),     # Q1
+                (0.1, 0.8),     # sigma1
+                (1.0, 8.0),     # delta1
+                (0.05, 0.7),    # Q2
+                (0.01, 0.4),    # sigma2
+            ],
+        )
+
+    def get_gain(self, spe, kind="gm"):
+        w, Q1, s1, d1, Q2, s2 = (float(v) for v in spe)
+        if kind == "gp":
+            return Q1
+        if kind == "gm":
+            spe_arr = jnp.asarray(spe, dtype=jnp.float64)
+            dspe = jax.grad(
+                lambda f: jnp.imag(_ser_ft_gamma_tweedie_kup(jnp.full((1,), f), spe_arr)[0])
+            )(0.0)
+            return float(-dspe)
+        raise ValueError(f"Unknown gain kind: {kind!r}")
+
+    def spe_report(self, spe):
+        w, Q1, s1, d1, Q2, s2 = (float(v) for v in spe)
+        return {
+            "w": w,
+            "Q1": Q1,
+            "sigma1": s1,
+            "delta1": d1,
+            "Q2": Q2,
+            "sigma2": s2,
+            "gain": self.get_gain(spe, "gm"),
+        }
+
+
 # ======================
 #    Recursive Polya
 # ======================

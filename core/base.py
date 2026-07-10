@@ -159,6 +159,7 @@ class PMTSpectrumFitter:
         lam_init: float = None,
         lam_bounds=(1e-6, 50.0),
         binint: str = "simpson",
+        zero_term: bool = True,
         log_A_err: float = 0.05,
         scale: float = None,
         mode: str = None,
@@ -318,7 +319,7 @@ class PMTSpectrumFitter:
         else:
             self._logl_raw = make_binned_logl(
                 self.grid, self._spectrum_fn, efficiency=self._efficiency,
-                atom_fn=self._atom_fn, scheme=binint,
+                atom_fn=self._atom_fn, scheme=binint, use_zero=zero_term,
             )
 
         self._bin_prob_fn = make_bin_prob_fn(

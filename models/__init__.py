@@ -10,6 +10,7 @@ from .polya import (
     BiPolyaFitter,
     PolyaExpFitter,
     GammaTweedieFitter,
+    GammaTweedieKupFitter,
     RecursivePolyaFitter,
     RecursiveGaussFitter,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "BiPolyaFitter",
     "PolyaExpFitter",
     "GammaTweedieFitter",
+    "GammaTweedieKupFitter",
     "RecursivePolyaFitter",
     "RecursiveGaussFitter",
 ]
