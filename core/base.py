@@ -158,6 +158,7 @@ class PMTSpectrumFitter:
         spe_block: ParamBlock = None,
         lam_init: float = None,
         lam_bounds=(1e-6, 50.0),
+        binint: str = "simpson",
         log_A_err: float = 0.05,
         scale: float = None,
         mode: str = None,
@@ -317,11 +318,11 @@ class PMTSpectrumFitter:
         else:
             self._logl_raw = make_binned_logl(
                 self.grid, self._spectrum_fn, efficiency=self._efficiency,
-                atom_fn=self._atom_fn,
+                atom_fn=self._atom_fn, scheme=binint,
             )
 
         self._bin_prob_fn = make_bin_prob_fn(
-            self.grid, self._spectrum_fn, self._efficiency
+            self.grid, self._spectrum_fn, self._efficiency, scheme=binint
         )
 
         self._logl_jit = jax.jit(self._logl_from_theta)

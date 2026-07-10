@@ -197,11 +197,13 @@ def cumulative_integrals_at(g_xsp, xsp, edges):
 # ==============================
 
 
-def make_bin_prob_fn(grid, spectrum_fn, efficiency):
+def make_bin_prob_fn(grid, spectrum_fn, efficiency, scheme="simpson"):
     """Return bin_probs(extra, thres, spe, lam) -> per-bin probabilities.
 
     Uses the analytic Fourier bin integrals when there is no threshold,
-    and the aligned-grid Simpson quadrature otherwise.
+    and the aligned-grid quadrature otherwise: composite Simpson
+    (scheme="simpson") or bin_width * density(bin midpoint)
+    (scheme="midpoint", the ROOT/kup effective integration).
     """
     freq = jnp.asarray(grid.freq)
     edges = jnp.asarray(grid.bins)
@@ -220,7 +222,12 @@ def make_bin_prob_fn(grid, spectrum_fn, efficiency):
 
         return bin_probs
 
-    simp_w = jnp.asarray(_simpson_weights(sample, dq))
+    if scheme == "midpoint":
+        w = np.zeros(sample + 1)
+        w[sample // 2] = sample * dq          # bin_width * g(mid)
+        simp_w = jnp.asarray(w)
+    else:
+        simp_w = jnp.asarray(_simpson_weights(sample, dq))
     idx = (
         grid.i_edge0
         + sample * np.arange(nbin)[:, None]
@@ -237,7 +244,8 @@ def make_bin_prob_fn(grid, spectrum_fn, efficiency):
     return bin_probs
 
 
-def make_binned_logl(grid, spectrum_fn, efficiency=None, atom_fn=None):
+def make_binned_logl(grid, spectrum_fn, efficiency=None, atom_fn=None,
+                     scheme="simpson"):
     """Build a binned extended-Poisson log-likelihood closure.
 
     Returns logl(log_A, extra, thres, spe, lam) -> scalar.  ``extra`` and
@@ -253,7 +261,7 @@ def make_binned_logl(grid, spectrum_fn, efficiency=None, atom_fn=None):
     hist = jnp.asarray(grid.hist)
     zero = float(grid.zero)
     log_C = float(grid.log_C)
-    bin_probs = make_bin_prob_fn(grid, spectrum_fn, efficiency)
+    bin_probs = make_bin_prob_fn(grid, spectrum_fn, efficiency, scheme=scheme)
 
     zero_prob = None
     if efficiency is None and atom_fn is not None:
