@@ -192,70 +192,70 @@ class PolyaExpFitter(PMTSpectrumFitter):
 # ======================
 
 
+# Aligned with the recursive models (kup conventions): spe =
+# (w, Q1, sigma1, delta1, Q2, sigma2) in ABSOLUTE gain units, inits and
+# boundaries identical to RecursivePolyaFitter (minus delta2 — Tweedie is
+# the single-generation truncation of the cascade), and the zero-charge
+# atom (1-w)exp(-delta1) STRIPPED + renormalized so the SER is the charge
+# of a DETECTED PE and lam counts detected PEs.
 def _ser_ft_gamma_tweedie(freq, spe):
-    frac, mean, sigma, lam_c, mean_t, sigma_t = spe
-    k, theta = _k_theta(mean, sigma)
-    k_ts = (mean_t / sigma_t) ** 2
-    theta_ts = mean * sigma_t**2 / mean_t
-    ts = ft_gamma(freq, k_ts, theta_ts)
-    # compound Poisson of small Gammas; includes its mass exp(-lam_c) at 0
-    compound = jnp.exp(lam_c * (ts - 1.0))
-    return frac * ft_gamma(freq, k, theta) + (1.0 - frac) * compound
-
-
-def _p0_gamma_tweedie(spe):
-    frac, lam_c = spe[0], spe[3]
-    return (1.0 - frac) * jnp.exp(-lam_c)
+    w, Q1, s1, d1, Q2, s2 = spe
+    g1 = ft_gamma(freq, *_k_theta(Q1, s1))
+    g2 = ft_gamma(freq, *_k_theta(Q2, s2))
+    f = w * g1 + (1.0 - w) * jnp.exp(d1 * (g2 - 1.0))
+    w0 = jnp.exp(-d1)
+    return (f - (1.0 - w) * w0) / (1.0 - (1.0 - w) * w0)   # PE | detected
 
 
 class GammaTweedieFitter(PMTSpectrumFitter):
     """Gamma SER plus a compound-Poisson-of-Gammas (Tweedie) component.
 
-    spe = (frac, mean, sigma, lam_c, mean_t, sigma_t).  With probability
-    1 - frac the PE charge is a Poisson(lam_c) sum of small Gammas with
-    mean = mean * mean_t and sigma = mean * sigma_t; that branch carries
-    a discrete mass (1 - frac) * exp(-lam_c) at zero charge.
+    spe = (w, Q1, sigma1, delta1, Q2, sigma2), kup gain units.  With
+    probability 1 - w the PE charge is a Poisson(delta1) sum of small
+    Gammas(Q2, sigma2); the zero atom is stripped (kup convention).
+    Inits/limits identical to RecursivePolyaFitter (no delta2).
     """
 
     def _model_callables(self):
-        return _ser_ft_gamma_tweedie, _p0_gamma_tweedie, None
+        return _ser_ft_gamma_tweedie, None, None
 
     def _default_spe_block(self):
-        s = self.scale
         return ParamBlock(
             name="spe",
-            names=["frac", "spe_mean", "spe_sigma", "lam_c", "mean_t", "sigma_t"],
-            init=np.array([0.60, 0.6 * s, 0.25 * s, 5.0, 0.6, 0.2]),
+            names=["w", "Q1", "sigma1", "delta1", "Q2", "sigma2"],
+            init=np.array([0.4, 1.0, 0.3, 3.0, 0.5, 0.2]),
             bounds=[
-                (0.3, 1.0),
-                (0.1 * s, 5.0 * s),
-                (0.02 * s, 2.0 * s),
-                (1.0, 20.0),
-                (0.05, 1.0),
-                (0.01, 1.0),
+                (0.1, 0.8),     # w
+                (0.4, 2.0),     # Q1
+                (0.1, 0.8),     # sigma1
+                (1.0, 8.0),     # delta1
+                (0.05, 0.7),    # Q2
+                (0.01, 0.4),    # sigma2
             ],
         )
 
     def get_gain(self, spe, kind="gm"):
-        frac, mean, sigma, lam_c, mean_t, _ = (float(v) for v in spe)
+        w, Q1, s1, d1, Q2, s2 = (float(v) for v in spe)
         if kind == "gp":
-            k, theta = _k_theta(mean, sigma)
-            return (k - 1.0) * theta
+            return Q1
         if kind == "gm":
-            frac_nz = frac / (1.0 - (1.0 - frac) * np.exp(-lam_c))
-            return frac_nz * mean + (1.0 - frac_nz) * mean * mean_t * lam_c
+            spe_arr = jnp.asarray(spe, dtype=jnp.float64)
+            dspe = jax.grad(
+                lambda f: jnp.imag(_ser_ft_gamma_tweedie(jnp.full((1,), f), spe_arr)[0])
+            )(0.0)
+            return float(-dspe)
         raise ValueError(f"Unknown gain kind: {kind!r}")
 
     def spe_report(self, spe):
-        frac, mean, sigma, lam_c, mean_t, sigma_t = (float(v) for v in spe)
+        w, Q1, s1, d1, Q2, s2 = (float(v) for v in spe)
         return {
-            "frac": frac,
-            "spe_mean": mean,
-            "spe_sigma": sigma,
-            "lam_c": lam_c,
-            "ts_mean": mean * mean_t,
-            "ts_sigma": mean * sigma_t,
-            "p0": (1.0 - frac) * np.exp(-lam_c),
+            "w": w,
+            "Q1": Q1,
+            "sigma1": s1,
+            "delta1": d1,
+            "Q2": Q2,
+            "sigma2": s2,
+            "gain": self.get_gain(spe, "gm"),
         }
 
 
