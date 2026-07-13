@@ -237,22 +237,44 @@ def make_bin_prob_fn(grid, spectrum_fn, efficiency):
     return bin_probs
 
 
-def make_binned_logl(grid, spectrum_fn, efficiency=None):
+def make_binned_logl(grid, spectrum_fn, efficiency=None, atom_fn=None):
     """Build a binned extended-Poisson log-likelihood closure.
 
     Returns logl(log_A, extra, thres, spe, lam) -> scalar.  ``extra`` and
     ``thres`` may be empty arrays when the corresponding setting is off.
+
+    Zero category: with ``atom_fn`` (and no efficiency) the zero
+    probability is the discrete no-charge atom pgf(p0) PLUS the analytic
+    below-edge integral of the continuous density over
+    [grid_left, bins[0]] (sub-threshold mass) — the calib scheme extended
+    with the atom.  Without ``atom_fn`` it falls back to 1 - sum(bins)
+    (which also absorbs the above-window tail).
     """
     hist = jnp.asarray(grid.hist)
     zero = float(grid.zero)
     log_C = float(grid.log_C)
     bin_probs = make_bin_prob_fn(grid, spectrum_fn, efficiency)
 
+    zero_prob = None
+    if efficiency is None and atom_fn is not None:
+        freq = jnp.asarray(grid.freq)
+        dq = float(grid.xsp_width)
+        N = len(grid.xsp)
+        below_edges = jnp.asarray([float(grid.xsp[0]), float(grid.bins[0])])
+
+        def zero_prob(extra, thres, spe, lam):
+            G_tilde = spectrum_fn(freq, extra, spe, lam)
+            below = _bin_integrals(G_tilde, below_edges, freq, N, dq)[0]
+            return atom_fn(spe, lam) + below
+
     def logl(log_A, extra, thres, spe, lam):
         A = jnp.exp(log_A)
         p_bins = bin_probs(extra, thres, spe, lam)
         y_est = jnp.maximum(A * p_bins, 1e-32)
-        z_prob = jnp.maximum(1.0 - jnp.sum(p_bins), 1e-32)
+        if zero_prob is None:
+            z_prob = jnp.maximum(1.0 - jnp.sum(p_bins), 1e-32)
+        else:
+            z_prob = jnp.maximum(zero_prob(extra, thres, spe, lam), 1e-32)
         z_est = A * z_prob
 
         ll_bins = jnp.sum(hist * jnp.log(y_est) - y_est)

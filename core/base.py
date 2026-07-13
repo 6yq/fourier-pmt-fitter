@@ -70,6 +70,7 @@ class FitResult:
     n_iter: int
     message: str
     layout: dict = field(default_factory=dict)
+    trace: list = None
 
     def block(self, name):
         sl = self.layout[name]
@@ -148,7 +149,7 @@ class PMTSpectrumFitter:
         bins=None,
         A=None,
         pedestal=False,
-        threshold=None,
+        threshold="erf",
         q_min=None,
         q_max=None,
         sample=None,
@@ -299,13 +300,24 @@ class PMTSpectrumFitter:
             self.pedestal, self._ft_extra, self._ser_ft, self._count_pgf, self._p0_fn
         )
 
+        # no-charge atom probability pgf(p0): part of the zero category in
+        # the atom + below-edge scheme (pedestal=True folds the atom into
+        # the continuous spectrum instead).
+        if self.pedestal:
+            self._atom_fn = lambda spe, lam: 0.0
+        else:
+            self._atom_fn = lambda spe, lam: jnp.real(
+                self._count_pgf(self._p0_fn(spe) * (1.0 + 0.0j), lam, spe)
+            )
+
         if mode == "unbinned":
             self._logl_raw = make_unbinned_logl(
                 Q_raw, self.grid, self._spectrum_fn, efficiency=self._efficiency
             )
         else:
             self._logl_raw = make_binned_logl(
-                self.grid, self._spectrum_fn, efficiency=self._efficiency
+                self.grid, self._spectrum_fn, efficiency=self._efficiency,
+                atom_fn=self._atom_fn,
             )
 
         self._bin_prob_fn = make_bin_prob_fn(
@@ -338,7 +350,7 @@ class PMTSpectrumFitter:
     #     MLE
     # ===========
 
-    def fit_mle(self, theta0=None, maxiter=500, pg_tol=0.5, multi_start=True):
+    def fit_mle(self, theta0=None, maxiter=500, pg_tol=0.5, multi_start=True, trace=False):
         """Maximum-likelihood fit (L-BFGS-B on JAX gradients).
 
         With a threshold the likelihood can be multi-modal (the truncated
@@ -351,6 +363,9 @@ class PMTSpectrumFitter:
         log-likelihood differences fall below float noise even though the
         optimum is reached; the fit is therefore also accepted when the
         scaled projected gradient max |g_j * max(|theta_j|, 1)| < pg_tol.
+
+        With trace=True the per-iteration log-likelihood of every start
+        is recorded in FitResult.trace (one array per start).
         """
         if theta0 is None:
             starts = [self.init.copy()]
@@ -370,7 +385,15 @@ class PMTSpectrumFitter:
             return -np.array(self._grad_jit(jnp.asarray(x)))
 
         res = None
+        traces = []
         for start in starts:
+            rec = []
+            callback = None
+            if trace:
+                rec.append(float(self._logl_jit(jnp.asarray(start))))
+                callback = lambda xk, rec=rec: rec.append(
+                    float(self._logl_jit(jnp.asarray(xk)))
+                )
             r = minimize(
                 neg_logl,
                 np.asarray(start, dtype=np.float64),
@@ -378,7 +401,9 @@ class PMTSpectrumFitter:
                 method="L-BFGS-B",
                 bounds=self.bounds,
                 options={"maxiter": maxiter},
+                callback=callback,
             )
+            traces.append(np.asarray(rec))
             if res is None or r.fun < res.fun:
                 res = r
 
@@ -400,6 +425,7 @@ class PMTSpectrumFitter:
             n_iter=int(res.nit),
             message=str(res.message),
             layout=self.layout,
+            trace=traces if trace else None,
         )
 
     def _extra_starts(self):
@@ -445,10 +471,31 @@ class PMTSpectrumFitter:
                 pg[j] = 0.0
         return pg
 
+    def hessian_cov(self, theta):
+        """Covariance matrix from the inverse Hessian of -logl."""
+        H = np.asarray(jax.hessian(self._logl_from_theta)(jnp.asarray(theta)))
+        return -np.linalg.pinv(H, hermitian=True)
+
+    def hessian_cov_psd(self, theta, floor=1e-10):
+        """Positive-(semi)definite covariance via the absolute-value Hessian.
+
+        At a flat optimum the log-likelihood Hessian can pick up a tiny
+        wrong-sign eigenvalue from FFT/quadrature noise, so the plain
+        ``-inv(H)`` is indefinite and its diagonal can go negative (NaN
+        errors).  Replacing each curvature eigenvalue ``w`` by ``-|w|``
+        (covariance eigenvalue ``1/|w|``) yields a PSD covariance whose
+        well-constrained directions are unchanged and whose flat
+        directions get a large but finite variance.
+        """
+        H = np.asarray(jax.hessian(self._logl_from_theta)(jnp.asarray(theta)))
+        H = 0.5 * (H + H.T)
+        w, V = np.linalg.eigh(H)
+        inv_abs = 1.0 / np.maximum(np.abs(w), floor)
+        return (V * inv_abs) @ V.T
+
     def _hessian_errors(self, theta):
         try:
-            H = np.asarray(jax.hessian(self._logl_from_theta)(jnp.asarray(theta)))
-            cov = -np.linalg.pinv(H, hermitian=True)
+            cov = self.hessian_cov(theta)
             diag = np.diag(cov)
             diag = np.where(diag > 0, diag, np.nan)
             return np.sqrt(diag)
@@ -467,11 +514,25 @@ class PMTSpectrumFitter:
         return np.asarray(jnp.exp(log_A) * p)
 
     def estimate_zero_count(self, theta):
-        """Expected count of the zero category (1 - window probability)."""
+        """Expected count of the zero category.
+
+        Matches the likelihood: atom + below-edge integral when there is
+        no threshold efficiency; 1 - window probability otherwise.
+        """
         t = jnp.asarray(theta)
-        log_A, *_ = self._unpack(t)
-        p = self.estimate_bin_counts(theta) / float(np.exp(log_A))
-        return float(np.exp(log_A) * max(1.0 - p.sum(), 0.0))
+        log_A, extra, thres, spe, lam = self._unpack(t)
+        A = float(np.exp(log_A))
+        if self._efficiency is None:
+            freq = jnp.asarray(self.grid.freq)
+            G_tilde = self._spectrum_fn(freq, extra, spe, lam)
+            below = _bin_integrals(
+                G_tilde,
+                jnp.asarray([float(self.grid.xsp[0]), float(self.grid.bins[0])]),
+                freq, len(self.grid.xsp), float(self.grid.xsp_width),
+            )[0]
+            return float(A * max(float(self._atom_fn(spe, lam) + below), 0.0))
+        p = self.estimate_bin_counts(theta) / A
+        return float(A * max(1.0 - p.sum(), 0.0))
 
     def estimate_bin_counts_at(self, theta, edges):
         """Expected counts for arbitrary bin edges."""

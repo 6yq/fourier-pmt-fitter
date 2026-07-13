@@ -1,0 +1,29 @@
+MC: 200000 events, fired 0.2393, P(S=0)=0.0878 -> lam_detected=0.2737  (1-exp(-lam)=0.2394)
+
+== full spectrum: converged=True logl=-558.3
+  w        fit     0.397  truth     0.400  (-0.8%)
+  Q1       fit   666.246  truth   666.670  (-0.1%)
+  sigma1   fit   200.296  truth   200.000  (+0.1%)
+  delta1   fit     1.949  truth     3.000  (-35.0%)
+  delta2   fit     0.796  truth     0.800  (-0.5%)
+  Q2       fit   331.839  truth   333.300  (-0.4%)
+  sigma2   fit   133.413  truth   133.300  (+0.1%)
+  lam      fit    0.2736  truth    0.2737  (-0.0%)
+  gain(gm) fit     800.8
+  occupancy fit 0.2393  MC fired 0.2393
+  zero: est 152136  MC 152140
+  components (exactly n detected PEs):
+    n=1: peak fit     598  MC     598   counts fit  41615.4  MC  41605
+    n=2: peak fit    1263  MC    1429   counts fit   5691.9  MC   5742
+    n=3: peak fit    1961  MC    2060   counts fit    518.7  MC    472
+
+== truncated Q >= 150.0: converged=True logl=-553.4
+  w        fit     0.388  truth     0.400  (-3.1%)
+  Q1       fit   662.286  truth   666.670  (-0.7%)
+  sigma1   fit   194.954  truth   200.000  (-2.5%)
+  delta1   fit     1.952  truth     3.000  (-34.9%)
+  delta2   fit     0.785  truth     0.800  (-1.8%)
+  Q2       fit   332.367  truth   333.300  (-0.3%)
+  sigma2   fit   131.483  truth   133.300  (-1.4%)
+
+saved /mnt/stage/liuyq/fsmp_commission/ridge/fitter/tests/out/mc_recursive.pdf

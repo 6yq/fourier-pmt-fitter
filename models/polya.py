@@ -15,6 +15,7 @@
 # ===========================================================================
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 
 from ..core.base import PMTSpectrumFitter, ParamBlock
@@ -262,96 +263,111 @@ class GammaTweedieFitter(PMTSpectrumFitter):
 #    Recursive Polya
 # ======================
 #
-# MCP-PMT recursive secondary-emission model.  A PE charge S is either a
-# direct Gamma (probability frac), or a Poisson(lam) sum of cascade
-# charges s, where each s is itself a Gamma (probability frac) or a
-# Poisson(lam_r) sum of further s (the recursion).  The cascade
-# characteristic function solves the fixed point
+# MCP-PMT recursive secondary-emission model, following the official
+# kup-gain kGammaRecursive (TF1Qspec::FFT_Recursive).  A PE charge S is
+# either a direct Gamma(Q1, sigma1) (probability w), or a Poisson(delta1)
+# sum of cascade charges s; each s is a Gamma(Q2, sigma2) (probability w)
+# or a Poisson(delta2) sum of further s.  The cascade characteristic
+# function solves the fixed point
 #
-#     s~ = frac * g_r~ + (1 - frac) * exp(lam_r * (s~ - 1))
+#     s~ = w * g2~ + (1 - w) * exp(delta2 * (s~ - 1))
 #
-# whose closed form uses the principal Lambert-W branch:
+# via the principal Lambert-W branch:
 #
-#     s~ = frac * g_r~ - W( lam_r (frac - 1) exp(lam_r (frac g_r~ - 1)) ) / lam_r
+#     s~ = w * g2~ - W( delta2 (w - 1) exp(delta2 (w g2~ - 1)) ) / delta2
 #
-# Subcriticality (finite cascade) requires (1 - frac) * lam_r < 1, which
-# the default bounds enforce.
+# kup-gain convention: the zero-charge atoms are STRIPPED and the FT
+# renormalized twice — cascade conditioned on nonzero (s~ - p_s0)/(1 -
+# p_s0), then the PE response conditioned on detection (f - (1-w)e^-d1)
+# / (1 - (1-w)e^-d1).  The SER is therefore the charge of a DETECTED PE:
+# lam counts detected PEs, occupancy = 1 - exp(-lam), and the n-PE
+# component is the n-fold convolution of nonzero charges (2 PE peaks at
+# ~2x gain).  delta2 may exceed 1 (kup allows supercritical cascades;
+# the same principal W branch is used).
 
 
-def _recursive_cascade_ft(ft_r, frac, lam_r):
-    arg = lam_r * (frac - 1.0) * jnp.exp(lam_r * (frac * ft_r - 1.0))
-    return frac * ft_r - lambert_w0(arg) / lam_r
+def _recursive_cascade_ft(ft_r, w, delta2):
+    arg = delta2 * (w - 1.0) * jnp.exp(delta2 * (w * ft_r - 1.0))
+    return w * ft_r - lambert_w0(arg) / delta2
+
+
+def _cascade_extinction(w, delta2):
+    """P(cascade charge = 0): the fixed point with g2~ -> 0."""
+    return jnp.real(_recursive_cascade_ft(jnp.zeros(()) * 1j, w, delta2))
 
 
 def _ser_ft_recursive(freq, spe):
-    frac, mean, sigma, lam, lam_r, mean_r, sigma_r = spe
-    k, theta = _k_theta(mean, sigma)
-    k_r = (mean_r / sigma_r) ** 2
-    theta_r = mean * sigma_r**2 / mean_r
-    ft_g = ft_gamma(freq, k, theta)
-    s_tilde = _recursive_cascade_ft(ft_gamma(freq, k_r, theta_r), frac, lam_r)
-    return frac * ft_g + (1.0 - frac) * jnp.exp(lam * (s_tilde - 1.0))
+    w, Q1, s1, d1, d2, Q2, s2 = spe
+    g1 = ft_gamma(freq, *_k_theta(Q1, s1))
+    g2 = ft_gamma(freq, *_k_theta(Q2, s2))
+    s_cas = _recursive_cascade_ft(g2, w, d2)
+    p_s0 = _cascade_extinction(w, d2)
+    s_cas = (s_cas - p_s0) / (1.0 - p_s0)          # cascade | nonzero
+    f = w * g1 + (1.0 - w) * jnp.exp(d1 * (s_cas - 1.0))
+    w0 = jnp.exp(-d1)                               # Poisson(0, delta1)
+    return (f - (1.0 - w) * w0) / (1.0 - (1.0 - w) * w0)   # PE | detected
 
 
-def _p0_recursive(spe):
-    frac, lam, lam_r = spe[0], spe[3], spe[4]
-    c_r = _recursive_cascade_ft(jnp.zeros(()) * 1j, frac, lam_r)
-    return jnp.real((1.0 - frac) * jnp.exp(lam * (c_r - 1.0)))
+# kup-gain laser.yaml mcp/kGammaRecursive limits are in gain units; our
+# charge is ADC*ns with 1 gain unit = 666.67 ADC*ns (user convention).
+_REC_SCALE = 666.67
 
 
 class RecursivePolyaFitter(PMTSpectrumFitter):
-    """Recursive secondary-emission Polya model for MCP PMTs.
+    """Official (kup-gain kGammaRecursive) recursive model for MCP PMTs.
 
-    spe = (frac, mean, sigma, lam, lam_r, mean_r, sigma_r).  The cascade
-    Gamma has mean = mean * mean_r and sigma = mean * sigma_r.  Zero
-    charge occurs when the recursive branch dies without emission, with
-    probability p0 = (1 - frac) * exp(lam * (c_r - 1)) where c_r is the
-    cascade extinction probability.
+    spe = (w, Q1, sigma1, delta1, delta2, Q2, sigma2); Q/sigma in ADC*ns
+    (kup gain-unit limits x 666.67).  The SER is conditioned on nonzero
+    charge (zero atoms stripped + renormalized, as in TF1Qspec), so there
+    is no p0 and lam is the detected-PE intensity.
     """
 
     def _model_callables(self):
-        return _ser_ft_recursive, _p0_recursive, None
+        return _ser_ft_recursive, None, None
 
     def _default_spe_block(self):
-        s = self.scale
+        s = _REC_SCALE
         return ParamBlock(
             name="spe",
-            names=["frac", "spe_mean", "spe_sigma", "lam", "lam_r", "mean_r", "sigma_r"],
-            init=np.array([0.40, 0.6 * s, 0.25 * s, 4.5, 0.8, 0.6, 0.2]),
+            names=["w", "Q1", "sigma1", "delta1", "delta2", "Q2", "sigma2"],
+            init=np.array([0.4, 1.0 * s, 0.3 * s, 3.0, 1.0, 0.5 * s, 0.2 * s]),
             bounds=[
-                (0.05, 1.0),
-                (0.1 * s, 5.0 * s),
-                (0.02 * s, 2.0 * s),
-                (1.0, 20.0),
-                (0.01, 0.99),
-                (0.05, 1.0),
-                (0.01, 1.0),
+                (0.1, 0.8),
+                (0.4 * s, 2.0 * s),
+                (0.1 * s, 0.8 * s),
+                (1.0, 8.0),
+                (0.1, 5.0),
+                (0.05 * s, 0.7 * s),
+                (0.01 * s, 0.4 * s),
             ],
         )
 
     def get_gain(self, spe, kind="gm"):
-        frac, mean, sigma, lam, lam_r, mean_r, _ = (float(v) for v in spe)
+        w, Q1, s1, d1, d2, Q2, _ = (float(v) for v in spe)
         if kind == "gp":
-            k, theta = _k_theta(mean, sigma)
+            k, theta = _k_theta(Q1, s1)
             return (k - 1.0) * theta
         if kind == "gm":
-            mu1 = mean
-            mu2 = mean * mean_r
-            Es = frac * mu2 / (1.0 - (1.0 - frac) * lam_r)
-            ES = frac * mu1 + (1.0 - frac) * lam * Es
-            pS = float(_p0_recursive(jnp.asarray(spe, dtype=jnp.float64)))
-            return ES / (1.0 - pS)
+            # mean of the detected-PE charge: -d Im[ser_ft]/df at f = 0
+            spe_arr = jnp.asarray(spe, dtype=jnp.float64)
+            dspe = jax.grad(
+                lambda f: jnp.imag(_ser_ft_recursive(jnp.full((1,), f), spe_arr)[0])
+            )(0.0)
+            return float(-dspe)
         raise ValueError(f"Unknown gain kind: {kind!r}")
 
     def spe_report(self, spe):
-        frac, mean, sigma, lam, lam_r, mean_r, sigma_r = (float(v) for v in spe)
+        w, Q1, s1, d1, d2, Q2, s2 = (float(v) for v in spe)
+        p_s0 = float(_cascade_extinction(w, d2))
         return {
-            "frac": frac,
-            "spe_mean": mean,
-            "spe_sigma": sigma,
-            "lam": lam,
-            "lam_r": lam_r,
-            "rec_mean": mean * mean_r,
-            "rec_sigma": mean * sigma_r,
-            "p0": float(_p0_recursive(jnp.asarray(spe, dtype=jnp.float64))),
+            "w": w,
+            "Q1": Q1,
+            "sigma1": s1,
+            "delta1": d1,
+            "delta2": d2,
+            "Q2": Q2,
+            "sigma2": s2,
+            "cascade_extinction": p_s0,
+            "subcritical": bool((1.0 - w) * d2 < 1.0),
+            "gain": self.get_gain(spe, "gm"),
         }
