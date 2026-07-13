@@ -57,53 +57,60 @@ def spe_gamma_tweedie(rng, n, frac=0.6, mean=0.6, sigma=0.25, lam_c=5.0,
     return out
 
 
-def spe_recursive_polya(rng, n, frac=0.4, mean=0.6, sigma=0.25, lam=4.5,
-                        lam_r=0.8, mean_r=0.6, sigma_r=0.2):
-    """Recursive secondary-emission sampler (matches RecursivePolyaFitter)."""
-    if (1.0 - frac) * lam_r >= 1.0:
-        raise ValueError("(1 - frac) * lam_r must be < 1.")
-    k1 = (mean / sigma) ** 2
-    theta1 = mean / k1
-    k2 = (mean_r / sigma_r) ** 2
-    theta2 = mean * sigma_r**2 / mean_r
+def spe_recursive_polya(rng, n, w=0.4, Q1=0.6, s1=0.25, d1=4.5,
+                        d2=0.8, Q2=0.6, s2=0.2):
+    """kup recursive sampler; returns DETECTED (nonzero) PE charges.
 
-    def sample_cascade(m):
-        """m cascade charges s."""
-        charge = np.zeros(m)
-        active = np.ones(m, dtype=np.int64)
-        while True:
-            alive = active > 0
-            if not alive.any():
-                break
-            a = active[alive]
-            direct = rng.binomial(a, frac)
-            nz = direct > 0
-            if nz.any():
-                idxs = np.where(alive)[0][nz]
-                for i, d in zip(idxs, direct[nz]):
-                    charge[i] += rng.gamma(shape=k2 * d, scale=theta2)
-            children = np.zeros_like(a)
-            spawn = a - direct
-            nzs = spawn > 0
-            if nzs.any():
-                children[nzs] = rng.poisson(lam_r * spawn[nzs])
-            active[alive] = children
-        return charge
+    Primary: direct Gamma(Q1, s1) w.p. w, else a Poisson(d1) sum of
+    cascade-electron charges; a cascade electron is Gamma(Q2, s2)
+    (absolute units) w.p. w, else a Poisson(d2) brood of further cascade
+    electrons.  Matches RecursivePolyaFitter, whose SER is conditioned on
+    nonzero charge (zero atoms stripped + renormalized).
+    """
+    if (1.0 - w) * d2 >= 1.0:
+        raise ValueError("(1 - w) * d2 must be < 1 (subcritical).")
+    k1 = (Q1 / s1) ** 2
+    k2 = (Q2 / s2) ** 2
+
+    def cascade(m):
+        """Total charge of m independent cascade electrons."""
+        out = np.zeros(m)
+        active = np.arange(m)          # owner index of each live electron
+        while len(active):
+            direct = rng.random(len(active)) < w
+            nd = int(direct.sum())
+            if nd:
+                q = rng.gamma(shape=k2, scale=Q2 / k2, size=nd)
+                np.add.at(out, active[direct], q)
+            children = rng.poisson(d2, size=int((~direct).sum()))
+            active = np.repeat(active[~direct], children)
+        return out
+
+    def cascade_conditioned(m):
+        """m cascade quanta conditioned on nonzero charge (the model's
+        delta1 counts DETECTED cascade electrons: s~ is conditioned
+        before the Poisson(d1) compound)."""
+        out = cascade(m)
+        z = out <= 0.0
+        while z.any():
+            out[z] = cascade(int(z.sum()))
+            z = out <= 0.0
+        return out
 
     out = np.zeros(n)
-    is_direct = rng.random(n) < frac
+    is_direct = rng.random(n) < w
     nd = int(is_direct.sum())
     if nd:
-        out[is_direct] = rng.gamma(shape=k1, scale=theta1, size=nd)
+        out[is_direct] = rng.gamma(shape=k1, scale=Q1 / k1, size=nd)
     idx = np.where(~is_direct)[0]
     if len(idx):
-        K = rng.poisson(lam, size=len(idx))
+        K = rng.poisson(d1, size=len(idx))
         tot = int(K.sum())
         if tot:
-            s_all = sample_cascade(tot)
+            s_all = cascade_conditioned(tot)
             owner = np.repeat(np.arange(len(idx)), K)
             out[idx] += np.bincount(owner, weights=s_all, minlength=len(idx))
-    return out
+    return out[out > 0]
 
 
 # ==============================

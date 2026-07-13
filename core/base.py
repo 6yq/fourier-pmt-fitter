@@ -149,7 +149,7 @@ class PMTSpectrumFitter:
         bins=None,
         A=None,
         pedestal=False,
-        threshold="erf",
+        threshold=None,
         q_min=None,
         q_max=None,
         sample=None,

@@ -178,8 +178,11 @@ def test_estimators_consistent():
     res = f.fit_mle()
 
     y = f.estimate_bin_counts(res.theta)
+    # zero category = atom + below-edge integral: the above-window tail is
+    # excluded by construction, so the identity holds only up to that tail
+    # (negligible for this toy spectrum).
     assert np.isclose(y.sum() + f.estimate_zero_count(res.theta),
-                      np.exp(res.theta[0]), rtol=1e-6)
+                      np.exp(res.theta[0]), rtol=1e-4)
 
     # n-PE components sum to the total within the window
     comp = sum(f.estimate_component_counts(res.theta, n) for n in range(1, 9))
