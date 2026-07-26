@@ -75,20 +75,44 @@ class PolyaFitter(PMTSpectrumFitter):
 
 
 def _ser_ft_bipolya(freq, spe):
-    frac, mean, sigma, mean_t, sigma_t = spe
-    k, theta = _k_theta(mean, sigma)
-    k_ts = (mean_t / sigma_t) ** 2
-    theta_ts = mean * sigma_t**2 / mean_t
-    return (1.0 - frac) * ft_gamma(freq, k, theta) + frac * ft_gamma(
-        freq, k_ts, theta_ts
-    )
+    """Two-Gamma SER in the (rate, broadness) parametrisation.
+
+    Each component is written as
+
+        f(x) = lam(1+th) (lam(1+th) x)^th exp(-lam(1+th) x) / Gamma(1+th)
+
+    i.e. a Gamma of SHAPE k = 1 + th and RATE lam(1+th), so that
+
+        mean = 1/lam        (pure scale)
+        var/mean^2 = 1/(1+th)   (pure broadness)
+
+    Component 1 is the NARROWER one by construction (th1 = th2 + dth, dth >= 0),
+    which removes the label-exchange degeneracy of the mixture.  th = 0 is the
+    exponential (shape 1); th < 0 is a density diverging at x -> 0.
+    """
+    frac, lam1, lam2, th2, dth = spe
+    k2 = 1.0 + th2
+    k1 = 1.0 + th2 + dth
+    # ft_gamma(freq, k, scale) with scale = mean/k = 1/(lam*k)
+    return ((1.0 - frac) * ft_gamma(freq, k1, 1.0 / (lam1 * k1))
+            + frac * ft_gamma(freq, k2, 1.0 / (lam2 * k2)))
 
 
 class BiPolyaFitter(PMTSpectrumFitter):
-    """Normal plus missing-first-dynode Polya.
+    """Two-Gamma SER, (rate, broadness) parametrisation.
 
-    spe = (frac, mean, sigma, mean_t, sigma_t); the missing component is
-    a Gamma with mean = mean * mean_t and sigma = mean * sigma_t.
+    spe = (frac, lam1, lam2, theta2, dtheta):
+      component 1 (weight 1-frac): mean 1/lam1, shape 1 + theta2 + dtheta
+      component 2 (weight frac)  : mean 1/lam2, shape 1 + theta2
+    Ordering dtheta >= 0 makes component 1 the narrower one, so the two
+    components cannot swap labels.  GammaExp is the interior point theta2 = 0
+    (a shape-1 second component IS the exponential), so the nesting
+    logl(BiGamma) >= logl(GammaExp) still holds.
+
+    The old (frac, mean, sigma, mean_t, sigma_t) form needed an arbitrary
+    floor on mean_t to stop the second Gamma collapsing onto q = 0; here the
+    dangerous directions are plain box constraints (theta2 from below, lam2
+    from above -> the component stays resolvable against the pedestal).
     """
 
     def _model_callables(self):
@@ -98,34 +122,43 @@ class BiPolyaFitter(PMTSpectrumFitter):
         s = self.scale
         return ParamBlock(
             name="spe",
-            names=["frac", "spe_mean", "spe_sigma", "mean_t", "sigma_t"],
-            init=np.array([0.10, 1.0 * s, 0.4 * s, 0.5, 0.1]),
+            names=["frac", "lam1", "lam2", "theta2", "dtheta"],
+            init=np.array([0.30, 1.0 / s, 2.0 / s, 0.0, 4.0]),
             bounds=[
                 (0.0, 1.0),
-                (0.2 * s, 5.0 * s),
-                (0.02 * s, 2.0 * s),
-                (0.01, 10.0),
-                (0.005, 10.0),
+                (1.0 / (5.0 * s), 1.0 / (0.2 * s)),     # mean1 in [0.2s, 5s]
+                (1.0 / (5.0 * s), 1.0 / (0.05 * s)),    # mean2 >= 0.05s
+                # NUMERICAL bound only (shape > 0): no physics floor is
+                # imposed on theta2.  MCP genuinely prefers a broad, shape < 1
+                # secondary (56% of channels, KDE mode k2 ~ 0.5) and any floor
+                # either cuts that population or gets railed by the
+                # pathological one -- the two overlap in this variable.  The
+                # basin is selected by the moment-based start instead.
+                (-0.999, 50.0),
+                (0.0, 50.0),                            # dtheta >= 0: ordering
             ],
         )
 
     def get_gain(self, spe, kind="gm"):
-        frac, mean, sigma, mean_t, _ = (float(v) for v in spe)
+        frac, lam1, lam2, th2, dth = (float(v) for v in spe)
         if kind == "gp":
-            k, theta = _k_theta(mean, sigma)
-            return (k - 1.0) * theta
+            k1 = 1.0 + th2 + dth                      # mode of component 1
+            return (k1 - 1.0) / (lam1 * k1)
         if kind == "gm":
-            return (1.0 - frac) * mean + frac * mean * mean_t
+            return (1.0 - frac) / lam1 + frac / lam2
         raise ValueError(f"Unknown gain kind: {kind!r}")
 
     def spe_report(self, spe):
-        frac, mean, sigma, mean_t, sigma_t = (float(v) for v in spe)
+        frac, lam1, lam2, th2, dth = (float(v) for v in spe)
+        k1, k2 = 1.0 + th2 + dth, 1.0 + th2
         return {
             "frac": frac,
-            "spe_mean": mean,
-            "spe_sigma": sigma,
-            "miss_mean": mean * mean_t,
-            "miss_sigma": mean * sigma_t,
+            "lam1": lam1, "lam2": lam2,
+            "theta1": th2 + dth, "theta2": th2, "dtheta": dth,
+            "shape1": k1, "shape2": k2,
+            "mean1": 1.0 / lam1, "mean2": 1.0 / lam2,
+            "sigma1": 1.0 / (lam1 * np.sqrt(k1)),
+            "sigma2": 1.0 / (lam2 * np.sqrt(k2)),
         }
 
 

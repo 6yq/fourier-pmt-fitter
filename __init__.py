@@ -10,6 +10,7 @@ from .core import (
 from .models import (
     GaussFitter,
     BiGaussFitter,
+    BiTruncGaussFitter,
     LinearGaussFitter,
     TriGaussFitter,
     GaussCompoundFitter,
@@ -33,6 +34,7 @@ __all__ = [
     "CombinedFitResult",
     "GaussFitter",
     "BiGaussFitter",
+    "BiTruncGaussFitter",
     "LinearGaussFitter",
     "TriGaussFitter",
     "GaussCompoundFitter",

@@ -1,6 +1,7 @@
 from .gauss import (
     GaussFitter,
     BiGaussFitter,
+    BiTruncGaussFitter,
     LinearGaussFitter,
     TriGaussFitter,
     GaussCompoundFitter,
@@ -19,6 +20,7 @@ from .polya import (
 __all__ = [
     "GaussFitter",
     "BiGaussFitter",
+    "BiTruncGaussFitter",
     "LinearGaussFitter",
     "TriGaussFitter",
     "GaussCompoundFitter",
