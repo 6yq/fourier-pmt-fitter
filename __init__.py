@@ -17,6 +17,8 @@ from .models import (
     BiPolyaFitter,
     PolyaExpFitter,
     GammaTweedieFitter,
+    GammaTweedieCondFitter,
+    GammaTweedieNBFitter,
     RecursivePolyaFitter,
     RecursiveGaussFitter,
 )
@@ -38,6 +40,8 @@ __all__ = [
     "BiPolyaFitter",
     "PolyaExpFitter",
     "GammaTweedieFitter",
+    "GammaTweedieCondFitter",
+    "GammaTweedieNBFitter",
     "RecursivePolyaFitter",
     "RecursiveGaussFitter",
 ]

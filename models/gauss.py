@@ -296,9 +296,11 @@ class GaussCompoundFitter(PMTSpectrumFitter):
         if kind == "gp":
             return mean
         if kind == "gm":
-            # mean conditional on non-zero charge
-            frac_nz = frac / (1.0 - (1.0 - frac) * np.exp(-lam_c))
-            return frac_nz * mean + (1.0 - frac_nz) * mean * mean_ts * lam_c
+            # conditioned mean E[q | q>0] = E[q]/(1-p0); same zero-truncation
+            # bookkeeping as GammaTweedieFitter (bug fixed 2026-07-17)
+            p0 = (1.0 - frac) * np.exp(-lam_c)
+            raw_mean = frac * mean + (1.0 - frac) * lam_c * mean_ts * mean
+            return raw_mean / (1.0 - p0)
         raise ValueError(f"Unknown gain kind: {kind!r}")
 
     def spe_report(self, spe):

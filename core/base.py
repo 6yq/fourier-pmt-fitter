@@ -93,6 +93,26 @@ def _ft_unity(freq, extra):
     return jnp.ones_like(freq) * (1.0 + 0.0j)
 
 
+def make_empirical_ped_ft(freq, template, trim_nsig=5.0):
+    """Empirical pedestal CF from pre-signal-window integrals (whole-spectrum
+    mode).  Tails are trimmed at trim_nsig robust sigmas around the median
+    (dark counts / rare glass PEs would double-count what lambda absorbs).
+    Returns a closure ft(freq, extra) -> fixed complex vector (extra unused).
+    """
+    q = np.asarray(template, dtype=float)
+    med = np.median(q)
+    mad = np.median(np.abs(q - med)) * 1.4826
+    keep = np.abs(q - med) <= trim_nsig * max(mad, 1e-12)
+    q = q[keep]
+    # numpy.fft sign convention (matches ft_gaussian_pedestal)
+    vec = jnp.asarray(np.exp(-1j * np.outer(freq, q)).mean(axis=1))
+
+    def ft(freq_, extra):
+        return vec
+
+    return ft
+
+
 # ==============================
 #     PMTSpectrumFitter
 # ==============================
@@ -149,6 +169,7 @@ class PMTSpectrumFitter:
         bins=None,
         A=None,
         pedestal=False,
+        ped_template=None,
         threshold=None,
         q_min=None,
         q_max=None,
@@ -181,7 +202,8 @@ class PMTSpectrumFitter:
         bins = np.asarray(bins, dtype=float)
         _A = int(A) if A is not None else int(hist.sum())
 
-        self.pedestal = bool(pedestal)
+        self.pedestal = bool(pedestal) or ped_template is not None
+        self.ped_template = ped_template
         self.threshold = threshold
         self.mode = mode
         self.Q_raw = Q_raw
@@ -203,7 +225,18 @@ class PMTSpectrumFitter:
         mean_obs = float(np.average(bin_mid, weights=hist)) if n_rec > 0 else 0.0
 
         if lam_init is None:
-            if self.grid.zero > 0:
+            if ped_template is not None:
+                # whole-spectrum: E[Q] = ped_mean + lam * gain; estimate the
+                # SPE scale from the (ped-subtracted) upper spectrum so the
+                # optimiser starts in the right lam<->gain basin
+                pm = float(np.median(np.asarray(ped_template, dtype=float)))
+                exq = mean_obs - pm
+                hiq = (float(np.quantile(Q_raw[Q_raw > pm], 0.97)) - pm
+                       if Q_raw is not None and (Q_raw > pm).sum() > 100
+                       else max(exq, 1.0) * 3.0)
+                gain_est = max(hiq / 3.0, 1e-6)
+                lam_init_ = float(np.clip(exq / gain_est, 5e-3, 5.0))
+            elif self.grid.zero > 0:
                 occ_est = min(n_rec / max(_A, 1), 1.0 - 1e-9)
                 lam_hat = -log(1.0 - occ_est)
                 lam_init_ = lam_hat - (np.exp(lam_hat) - 1.0) / (2.0 * _A)
@@ -217,16 +250,24 @@ class PMTSpectrumFitter:
         # ========================
         #     Parameter blocks
         # ========================
-        if self.pedestal:
+        if self.pedestal and self.ped_template is None:
             self.extra_block = extra_block or self._default_extra_block()
         else:
+            # ped_template: empirical CF is fixed -> no pedestal params
             self.extra_block = extra_block or ParamBlock(
                 "pedestal", [], np.empty(0), []
             )
 
         if scale is None:
-            ped_mean0 = float(self.extra_block.init[0]) if self.pedestal else 0.0
-            if self.grid.zero > 0:
+            ped_mean0 = (float(self.extra_block.init[0])
+                         if self.pedestal and len(self.extra_block.init)
+                         else (float(np.median(self.ped_template))
+                               if self.ped_template is not None else 0.0))
+            if self.ped_template is not None:
+                # whole spectrum: E[Q] = ped + lam * gain
+                scale = (mean_obs - ped_mean0) / max(self.lam_init, 1e-3)
+                scale = max(scale, 1e-6)
+            elif self.grid.zero > 0:
                 # recorded events are (mostly) >= 1 PE:
                 # E[Q - ped | recorded] ~ lam * gain / occ
                 occ_est = n_rec / max(_A, 1)
@@ -293,7 +334,12 @@ class PMTSpectrumFitter:
         self._ser_ft = ser_ft
         self._p0_fn = p0_fn or (lambda spe: 0.0)
         self._count_pgf = count_pgf or poisson_pgf
-        self._ft_extra = ft_gaussian_pedestal if self.pedestal else _ft_unity
+        if ped_template is not None:
+            # whole-spectrum mode: fixed empirical pedestal CF, no threshold,
+            # no zero category (atom folded); dof = logA + spe + lam only
+            self._ft_extra = make_empirical_ped_ft(self.grid.freq, ped_template)
+        else:
+            self._ft_extra = ft_gaussian_pedestal if self.pedestal else _ft_unity
         self._efficiency = make_efficiency(threshold)
 
         self._spectrum_fn = make_spectrum_fn(
