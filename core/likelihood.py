@@ -126,6 +126,21 @@ def make_efficiency(kind):
             return jax.nn.sigmoid((q - thres[0]) / thres[1])
 
         return eff
+    if kind == "lognormal":
+        # Log-normal turn-on: eff = Phi((ln q - ln loc) / s), loc = median
+        # (q50), s = dimensionless log-width.  Support is q > 0 (below the
+        # pedestal the density is anyway zero); the double-where keeps ln
+        # off non-positive q so the gradient stays finite.
+        sqrt2 = float(np.sqrt(2.0))
+
+        def eff(q, thres):
+            pos = q > 0.0
+            safe_q = jnp.where(pos, q, 1.0)
+            z = (jnp.log(safe_q) - jnp.log(thres[0])) / thres[1]
+            phi = 0.5 * (1.0 + jax.scipy.special.erf(z / sqrt2))
+            return jnp.where(pos, phi, 0.0)
+
+        return eff
     raise ValueError(f"Unknown threshold kind: {kind!r}")
 
 
@@ -197,11 +212,13 @@ def cumulative_integrals_at(g_xsp, xsp, edges):
 # ==============================
 
 
-def make_bin_prob_fn(grid, spectrum_fn, efficiency):
+def make_bin_prob_fn(grid, spectrum_fn, efficiency, scheme="simpson"):
     """Return bin_probs(extra, thres, spe, lam) -> per-bin probabilities.
 
     Uses the analytic Fourier bin integrals when there is no threshold,
-    and the aligned-grid Simpson quadrature otherwise.
+    and the aligned-grid quadrature otherwise: composite Simpson
+    (scheme="simpson") or bin_width * density(bin midpoint)
+    (scheme="midpoint", the ROOT/kup effective integration).
     """
     freq = jnp.asarray(grid.freq)
     edges = jnp.asarray(grid.bins)
@@ -220,7 +237,12 @@ def make_bin_prob_fn(grid, spectrum_fn, efficiency):
 
         return bin_probs
 
-    simp_w = jnp.asarray(_simpson_weights(sample, dq))
+    if scheme == "midpoint":
+        w = np.zeros(sample + 1)
+        w[sample // 2] = sample * dq          # bin_width * g(mid)
+        simp_w = jnp.asarray(w)
+    else:
+        simp_w = jnp.asarray(_simpson_weights(sample, dq))
     idx = (
         grid.i_edge0
         + sample * np.arange(nbin)[:, None]
@@ -237,7 +259,8 @@ def make_bin_prob_fn(grid, spectrum_fn, efficiency):
     return bin_probs
 
 
-def make_binned_logl(grid, spectrum_fn, efficiency=None, atom_fn=None):
+def make_binned_logl(grid, spectrum_fn, efficiency=None, atom_fn=None,
+                     scheme="simpson", use_zero=True):
     """Build a binned extended-Poisson log-likelihood closure.
 
     Returns logl(log_A, extra, thres, spe, lam) -> scalar.  ``extra`` and
@@ -253,7 +276,7 @@ def make_binned_logl(grid, spectrum_fn, efficiency=None, atom_fn=None):
     hist = jnp.asarray(grid.hist)
     zero = float(grid.zero)
     log_C = float(grid.log_C)
-    bin_probs = make_bin_prob_fn(grid, spectrum_fn, efficiency)
+    bin_probs = make_bin_prob_fn(grid, spectrum_fn, efficiency, scheme=scheme)
 
     zero_prob = None
     if efficiency is None and atom_fn is not None:
@@ -278,6 +301,8 @@ def make_binned_logl(grid, spectrum_fn, efficiency=None, atom_fn=None):
         z_est = A * z_prob
 
         ll_bins = jnp.sum(hist * jnp.log(y_est) - y_est)
+        if not use_zero:
+            return ll_bins - log_C          # shape-only (kup-style, no zero term)
         ll_zero = zero * jnp.log(z_est) - z_est
         return ll_bins + ll_zero - log_C
 

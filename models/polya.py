@@ -75,44 +75,20 @@ class PolyaFitter(PMTSpectrumFitter):
 
 
 def _ser_ft_bipolya(freq, spe):
-    """Two-Gamma SER in the (rate, broadness) parametrisation.
-
-    Each component is written as
-
-        f(x) = lam(1+th) (lam(1+th) x)^th exp(-lam(1+th) x) / Gamma(1+th)
-
-    i.e. a Gamma of SHAPE k = 1 + th and RATE lam(1+th), so that
-
-        mean = 1/lam        (pure scale)
-        var/mean^2 = 1/(1+th)   (pure broadness)
-
-    Component 1 is the NARROWER one by construction (th1 = th2 + dth, dth >= 0),
-    which removes the label-exchange degeneracy of the mixture.  th = 0 is the
-    exponential (shape 1); th < 0 is a density diverging at x -> 0.
-    """
-    frac, lam1, lam2, th2, dth = spe
-    k2 = 1.0 + th2
-    k1 = 1.0 + th2 + dth
-    # ft_gamma(freq, k, scale) with scale = mean/k = 1/(lam*k)
-    return ((1.0 - frac) * ft_gamma(freq, k1, 1.0 / (lam1 * k1))
-            + frac * ft_gamma(freq, k2, 1.0 / (lam2 * k2)))
+    frac, mean, sigma, mean_t, sigma_t = spe
+    k, theta = _k_theta(mean, sigma)
+    k_ts = (mean_t / sigma_t) ** 2
+    theta_ts = mean * sigma_t**2 / mean_t
+    return (1.0 - frac) * ft_gamma(freq, k, theta) + frac * ft_gamma(
+        freq, k_ts, theta_ts
+    )
 
 
 class BiPolyaFitter(PMTSpectrumFitter):
-    """Two-Gamma SER, (rate, broadness) parametrisation.
+    """Normal plus missing-first-dynode Polya.
 
-    spe = (frac, lam1, lam2, theta2, dtheta):
-      component 1 (weight 1-frac): mean 1/lam1, shape 1 + theta2 + dtheta
-      component 2 (weight frac)  : mean 1/lam2, shape 1 + theta2
-    Ordering dtheta >= 0 makes component 1 the narrower one, so the two
-    components cannot swap labels.  GammaExp is the interior point theta2 = 0
-    (a shape-1 second component IS the exponential), so the nesting
-    logl(BiGamma) >= logl(GammaExp) still holds.
-
-    The old (frac, mean, sigma, mean_t, sigma_t) form needed an arbitrary
-    floor on mean_t to stop the second Gamma collapsing onto q = 0; here the
-    dangerous directions are plain box constraints (theta2 from below, lam2
-    from above -> the component stays resolvable against the pedestal).
+    spe = (frac, mean, sigma, mean_t, sigma_t); the missing component is
+    a Gamma with mean = mean * mean_t and sigma = mean * sigma_t.
     """
 
     def _model_callables(self):
@@ -122,43 +98,34 @@ class BiPolyaFitter(PMTSpectrumFitter):
         s = self.scale
         return ParamBlock(
             name="spe",
-            names=["frac", "lam1", "lam2", "theta2", "dtheta"],
-            init=np.array([0.30, 1.0 / s, 2.0 / s, 0.0, 4.0]),
+            names=["frac", "spe_mean", "spe_sigma", "mean_t", "sigma_t"],
+            init=np.array([0.10, 1.0 * s, 0.4 * s, 0.5, 0.1]),
             bounds=[
-                (0.0, 1.0),
-                (1.0 / (5.0 * s), 1.0 / (0.2 * s)),     # mean1 in [0.2s, 5s]
-                (1.0 / (5.0 * s), 1.0 / (0.05 * s)),    # mean2 >= 0.05s
-                # NUMERICAL bound only (shape > 0): no physics floor is
-                # imposed on theta2.  MCP genuinely prefers a broad, shape < 1
-                # secondary (56% of channels, KDE mode k2 ~ 0.5) and any floor
-                # either cuts that population or gets railed by the
-                # pathological one -- the two overlap in this variable.  The
-                # basin is selected by the moment-based start instead.
-                (-0.999, 50.0),
-                (0.0, 50.0),                            # dtheta >= 0: ordering
+                (0.0, 0.5),
+                (0.2 * s, 5.0 * s),
+                (0.02 * s, 2.0 * s),
+                (0.01, 1.0),
+                (0.005, 1.0),
             ],
         )
 
     def get_gain(self, spe, kind="gm"):
-        frac, lam1, lam2, th2, dth = (float(v) for v in spe)
+        frac, mean, sigma, mean_t, _ = (float(v) for v in spe)
         if kind == "gp":
-            k1 = 1.0 + th2 + dth                      # mode of component 1
-            return (k1 - 1.0) / (lam1 * k1)
+            k, theta = _k_theta(mean, sigma)
+            return (k - 1.0) * theta
         if kind == "gm":
-            return (1.0 - frac) / lam1 + frac / lam2
+            return (1.0 - frac) * mean + frac * mean * mean_t
         raise ValueError(f"Unknown gain kind: {kind!r}")
 
     def spe_report(self, spe):
-        frac, lam1, lam2, th2, dth = (float(v) for v in spe)
-        k1, k2 = 1.0 + th2 + dth, 1.0 + th2
+        frac, mean, sigma, mean_t, sigma_t = (float(v) for v in spe)
         return {
             "frac": frac,
-            "lam1": lam1, "lam2": lam2,
-            "theta1": th2 + dth, "theta2": th2, "dtheta": dth,
-            "shape1": k1, "shape2": k2,
-            "mean1": 1.0 / lam1, "mean2": 1.0 / lam2,
-            "sigma1": 1.0 / (lam1 * np.sqrt(k1)),
-            "sigma2": 1.0 / (lam2 * np.sqrt(k2)),
+            "spe_mean": mean,
+            "spe_sigma": sigma,
+            "miss_mean": mean * mean_t,
+            "miss_sigma": mean * sigma_t,
         }
 
 
@@ -276,13 +243,8 @@ class GammaTweedieFitter(PMTSpectrumFitter):
             k, theta = _k_theta(mean, sigma)
             return (k - 1.0) * theta
         if kind == "gm":
-            # conditioned mean E[q | q>0] = E[q]/(1-p0); the compound branch
-            # of the truncated mixture carries lam_c/(1-exp(-lam_c)), NOT
-            # lam_c (bookkeeping bug found 2026-07-17: -4.6% at typical
-            # params; the fit itself was never affected — reporting only)
-            p0 = (1.0 - frac) * np.exp(-lam_c)
-            raw_mean = frac * mean + (1.0 - frac) * lam_c * mean_t * mean
-            return raw_mean / (1.0 - p0)
+            frac_nz = frac / (1.0 - (1.0 - frac) * np.exp(-lam_c))
+            return frac_nz * mean + (1.0 - frac_nz) * mean * mean_t * lam_c
         raise ValueError(f"Unknown gain kind: {kind!r}")
 
     def spe_report(self, spe):
@@ -298,112 +260,64 @@ class GammaTweedieFitter(PMTSpectrumFitter):
         }
 
 
-# ==============================
-#  Gamma Tweedie, conditioned
-# ==============================
+def _ser_ft_gamma_tweedie_kup(freq, spe):
+    w, Q1, s1, d1, Q2, s2 = spe
+    g1 = ft_gamma(freq, *_k_theta(Q1, s1))
+    g2 = ft_gamma(freq, *_k_theta(Q2, s2))
+    f = w * g1 + (1.0 - w) * jnp.exp(d1 * (g2 - 1.0))
+    w0 = jnp.exp(-d1)
+    return (f - (1.0 - w) * w0) / (1.0 - (1.0 - w) * w0)   # PE | detected
 
 
-def _ser_ft_gamma_tweedie_cond(freq, spe):
-    # zero-conditioned GT for whole-spectrum (pedestal-template) mode: the
-    # explicit atom is an exactly flat likelihood direction there (only
-    # lam*(1-p0) enters), so strip and renormalize; lam becomes the
-    # detected-PE intensity, matching the Recur convention.
-    f = _ser_ft_gamma_tweedie(freq, spe)
-    frac, lam_c = spe[0], spe[3]
-    p0 = (1.0 - frac) * jnp.exp(-lam_c)
-    return (f - p0) / (1.0 - p0)
+class GammaTweedieKupFitter(PMTSpectrumFitter):
+    """Tuning variant: GT with kup parameterization/boxes, atom stripped.
 
-
-class GammaTweedieCondFitter(GammaTweedieFitter):
-    """Zero-conditioned GammaTweedie (whole-spectrum mode; no zero atom)."""
-
-    def _model_callables(self):
-        return _ser_ft_gamma_tweedie_cond, None, None
-
-
-# ==============================
-#  Gamma Tweedie, NegBin count
-# ==============================
-
-
-def _ser_ft_gamma_tweedie_nb(freq, spe):
-    frac, mean, sigma, lam_c, mean_t, sigma_t, r_nb = spe
-    k, theta = _k_theta(mean, sigma)
-    k_ts = (mean_t / sigma_t) ** 2
-    theta_ts = mean * sigma_t**2 / mean_t
-    ts = ft_gamma(freq, k_ts, theta_ts)
-    # negative-binomial count of small Gammas: mean lam_c, dispersion r_nb.
-    # Single generation; NB = Poisson with Gamma-fluctuating yield (pore-to-
-    # pore gain variation) -> overdispersed count WITHOUT higher-order
-    # cascade generations.  r_nb -> inf recovers the Poisson (plain GT).
-    compound = jnp.exp(-r_nb * jnp.log1p(lam_c * (1.0 - ts) / r_nb))
-    return frac * ft_gamma(freq, k, theta) + (1.0 - frac) * compound
-
-
-def _p0_gamma_tweedie_nb(spe):
-    frac, lam_c, r_nb = spe[0], spe[3], spe[6]
-    return (1.0 - frac) * jnp.exp(-r_nb * jnp.log1p(lam_c / r_nb))
-
-
-class GammaTweedieNBFitter(PMTSpectrumFitter):
-    """GT with negative-binomial secondary count (single generation).
-
-    spe = (frac, mean, sigma, lam_c, mean_t, sigma_t, r_nb).  Identical to
-    GammaTweedieFitter except the (1-frac) branch counts secondaries with
-    NegBin(mean=lam_c, dispersion=r_nb) instead of Poisson(lam_c): the
-    physically-motivated overdispersion (yield fluctuating channel-area /
-    strike-point to strike-point) that the recursive cascade fakes with
-    unphysical higher-order generations.  7 spe params = same dof as
-    RecursivePolyaFitter -> BIC-comparable.
+    spe = (w, Q1, sigma1, delta1, Q2, sigma2), kup gain units.  With
+    probability 1 - w the PE charge is a Poisson(delta1) sum of small
+    Gammas(Q2, sigma2); the zero atom is stripped (kup convention).
+    Inits/limits identical to RecursivePolyaFitter (no delta2).
     """
 
     def _model_callables(self):
-        return _ser_ft_gamma_tweedie_nb, _p0_gamma_tweedie_nb, None
+        return _ser_ft_gamma_tweedie_kup, None, None
 
     def _default_spe_block(self):
-        s = self.scale
         return ParamBlock(
             name="spe",
-            names=["frac", "spe_mean", "spe_sigma", "lam_c", "mean_t",
-                   "sigma_t", "r_nb"],
-            init=np.array([0.60, 0.6 * s, 0.25 * s, 3.0, 0.6, 0.2, 3.0]),
+            names=["w", "Q1", "sigma1", "delta1", "Q2", "sigma2"],
+            init=np.array([0.4, 1.0, 0.3, 3.0, 0.5, 0.2]),
             bounds=[
-                (0.3, 1.0),
-                (0.1 * s, 5.0 * s),
-                (0.02 * s, 2.0 * s),
-                (1.0, 8.0),     # secondary yield: same range as Recur delta1
-                (0.05, 1.0),
-                (0.01, 1.0),
-                (0.2, 50.0),    # NB dispersion; large -> Poisson limit
+                (0.1, 0.8),     # w
+                (0.4, 2.0),     # Q1
+                (0.1, 0.8),     # sigma1
+                (1.0, 8.0),     # delta1
+                (0.05, 0.7),    # Q2
+                (0.01, 0.4),    # sigma2
             ],
         )
 
     def get_gain(self, spe, kind="gm"):
-        frac, mean, sigma, lam_c, mean_t, _, r_nb = (float(v) for v in spe)
+        w, Q1, s1, d1, Q2, s2 = (float(v) for v in spe)
         if kind == "gp":
-            k, theta = _k_theta(mean, sigma)
-            return (k - 1.0) * theta
+            return Q1
         if kind == "gm":
-            # conditioned mean E[q | q>0] = E[q]/(1-p0); NB count mean is
-            # lam_c, so the raw mean matches GT — same zero-truncation
-            # bookkeeping as GammaTweedieFitter (bug fixed 2026-07-17)
-            p0 = (1.0 - frac) * (1.0 + lam_c / r_nb) ** (-r_nb)
-            raw_mean = frac * mean + (1.0 - frac) * lam_c * mean_t * mean
-            return raw_mean / (1.0 - p0)
+            spe_arr = jnp.asarray(spe, dtype=jnp.float64)
+            dspe = jax.grad(
+                lambda f: jnp.imag(_ser_ft_gamma_tweedie_kup(jnp.full((1,), f), spe_arr)[0])
+            )(0.0)
+            return float(-dspe)
         raise ValueError(f"Unknown gain kind: {kind!r}")
 
     def spe_report(self, spe):
-        frac, mean, sigma, lam_c, mean_t, sigma_t, r_nb = (
-            float(v) for v in spe)
+        w, Q1, s1, d1, Q2, s2 = (float(v) for v in spe)
         return {
-            "frac": frac,
-            "spe_mean": mean,
-            "spe_sigma": sigma,
-            "lam_c": lam_c,
-            "r_nb": r_nb,
-            "ts_mean": mean * mean_t,
-            "ts_sigma": mean * sigma_t,
-            "p0": (1.0 - frac) * (1.0 + lam_c / r_nb) ** (-r_nb),
+            "w": w,
+            "Q1": Q1,
+            "sigma1": s1,
+            "delta1": d1,
+            "Q2": Q2,
+            "sigma2": s2,
+            "gain": self.get_gain(spe, "gm"),
         }
 
 

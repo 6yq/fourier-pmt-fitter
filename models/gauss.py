@@ -10,7 +10,6 @@
 # ===========================================================================
 
 import numpy as np
-import jax
 import jax.numpy as jnp
 
 from ..core.base import PMTSpectrumFitter, ParamBlock
@@ -107,87 +106,6 @@ class BiGaussFitter(PMTSpectrumFitter):
             "miss_mean": mean * mean_r,
             "miss_sigma": mean * sigma_r,
         }
-
-
-# ==============================
-#   Bi-truncated-Gauss (kup)
-# ==============================
-#
-# The official kup-gain default DYNODE model (laser.yaml `dynode:
-# kDoubleGauss`, TF1ConvTool::DoubleGauss): the SER is a mixture of two
-# Gaussians TRUNCATED at zero charge,
-#
-#   f(Q>0) = w * TG(Q; Q1, s1) + (1-w) * TG(Q; a*Q1, b*s1),   f(Q<=0)=0
-#   TG(Q; q, s) = N(Q; q, s) / [ (1 + erf(q/(sqrt2 s))) / 2 ]   (kup EvalTruncatedGauss)
-#
-# with spe = (Q1, s1, w, a, b) (a=f_Q charge ratio, b=f_s sigma ratio of
-# the secondary).  The truncated-Gaussian characteristic function has no
-# elementary closed form (complex erf); it is evaluated as a differentiable
-# discrete Fourier sum of the density on a fixed charge grid (same device
-# as make_empirical_ped_ft), which also captures the x=0 truncation edge.
-
-_BTG_NX = 1024
-_BTG_XMAX = 6.0
-_BTG_XG = jnp.linspace(_BTG_XMAX / _BTG_NX, _BTG_XMAX, _BTG_NX)  # charge grid, >0
-_BTG_DX = float(_BTG_XG[1] - _BTG_XG[0])
-_SQRT2 = jnp.sqrt(2.0)
-_SQRT2PI = jnp.sqrt(2.0 * jnp.pi)
-
-
-def _trunc_gauss_pdf(x, q, s):
-    """Zero-truncated Gaussian density (kup EvalTruncatedGauss), x assumed > 0."""
-    gN = 0.5 * (1.0 + jax.scipy.special.erf(q / (_SQRT2 * s)))
-    return jnp.exp(-0.5 * ((x - q) / s) ** 2) / (s * _SQRT2PI * gN)
-
-
-def _ser_ft_bitruncgauss(freq, spe):
-    Q1, s1, w, a, b = spe
-    dens = (w * _trunc_gauss_pdf(_BTG_XG, Q1, s1)
-            + (1.0 - w) * _trunc_gauss_pdf(_BTG_XG, a * Q1, b * s1))
-    dens = dens / (dens.sum() * _BTG_DX)                 # renormalise (grid clip)
-    # numpy.fft sign convention: f~(w) = int dens(x) exp(-i w x) dx
-    return (jnp.exp(-1j * jnp.outer(freq, _BTG_XG)) * dens[None, :]).sum(1) * _BTG_DX
-
-
-def _trunc_gauss_mean(q, s):
-    a = q / s
-    from scipy.stats import norm
-    return q + s * norm.pdf(a) / max(norm.cdf(a), 1e-12)
-
-
-class BiTruncGaussFitter(PMTSpectrumFitter):
-    """kup-gain default DYNODE model: bi-truncated-Gaussian SER.
-
-    spe = (spe_mean, spe_sigma, w, f_Q, f_s); secondary Gaussian has
-    mean = f_Q * spe_mean, sigma = f_s * spe_sigma, both truncated at 0.
-    Parametrised in gain units (kup laser.yaml kSPEMode) -- feed charge
-    normalised by the per-channel gain.
-    """
-
-    def _model_callables(self):
-        return _ser_ft_bitruncgauss, None, None
-
-    def _default_spe_block(self):
-        return ParamBlock(
-            name="spe",
-            names=["spe_mean", "spe_sigma", "w", "f_Q", "f_s"],
-            init=np.array([0.9, 0.3, 0.9, 0.3, 0.8]),
-            bounds=[(0.3, 1.8), (0.1, 0.8), (0.0, 1.0), (0.1, 0.6), (0.1, 1.5)],
-        )
-
-    def get_gain(self, spe, kind="gm"):
-        Q1, s1, w, a, b = (float(v) for v in spe)
-        if kind == "gp":
-            return Q1
-        if kind == "gm":
-            return w * _trunc_gauss_mean(Q1, s1) + (1.0 - w) * _trunc_gauss_mean(a * Q1, b * s1)
-        raise ValueError(f"Unknown gain kind: {kind!r}")
-
-    def spe_report(self, spe):
-        Q1, s1, w, a, b = (float(v) for v in spe)
-        return {"spe_mean": Q1, "spe_sigma": s1, "w": w, "f_Q": a, "f_s": b,
-                "sec_mean": a * Q1, "sec_sigma": b * s1,
-                "gain": self.get_gain(spe, "gm")}
 
 
 # ======================
@@ -378,11 +296,9 @@ class GaussCompoundFitter(PMTSpectrumFitter):
         if kind == "gp":
             return mean
         if kind == "gm":
-            # conditioned mean E[q | q>0] = E[q]/(1-p0); same zero-truncation
-            # bookkeeping as GammaTweedieFitter (bug fixed 2026-07-17)
-            p0 = (1.0 - frac) * np.exp(-lam_c)
-            raw_mean = frac * mean + (1.0 - frac) * lam_c * mean_ts * mean
-            return raw_mean / (1.0 - p0)
+            # mean conditional on non-zero charge
+            frac_nz = frac / (1.0 - (1.0 - frac) * np.exp(-lam_c))
+            return frac_nz * mean + (1.0 - frac_nz) * mean * mean_ts * lam_c
         raise ValueError(f"Unknown gain kind: {kind!r}")
 
     def spe_report(self, spe):

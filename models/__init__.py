@@ -1,7 +1,6 @@
 from .gauss import (
     GaussFitter,
     BiGaussFitter,
-    BiTruncGaussFitter,
     LinearGaussFitter,
     TriGaussFitter,
     GaussCompoundFitter,
@@ -11,8 +10,7 @@ from .polya import (
     BiPolyaFitter,
     PolyaExpFitter,
     GammaTweedieFitter,
-    GammaTweedieCondFitter,
-    GammaTweedieNBFitter,
+    GammaTweedieKupFitter,
     RecursivePolyaFitter,
     RecursiveGaussFitter,
 )
@@ -20,7 +18,6 @@ from .polya import (
 __all__ = [
     "GaussFitter",
     "BiGaussFitter",
-    "BiTruncGaussFitter",
     "LinearGaussFitter",
     "TriGaussFitter",
     "GaussCompoundFitter",
@@ -28,8 +25,7 @@ __all__ = [
     "BiPolyaFitter",
     "PolyaExpFitter",
     "GammaTweedieFitter",
-    "GammaTweedieCondFitter",
-    "GammaTweedieNBFitter",
+    "GammaTweedieKupFitter",
     "RecursivePolyaFitter",
     "RecursiveGaussFitter",
 ]
