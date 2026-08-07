@@ -4,6 +4,7 @@ from .gauss import (
     LinearGaussFitter,
     TriGaussFitter,
     GaussCompoundFitter,
+    BiTruncGaussFitter,
 )
 from .polya import (
     PolyaFitter,
@@ -21,6 +22,7 @@ __all__ = [
     "LinearGaussFitter",
     "TriGaussFitter",
     "GaussCompoundFitter",
+    "BiTruncGaussFitter",
     "PolyaFitter",
     "BiPolyaFitter",
     "PolyaExpFitter",

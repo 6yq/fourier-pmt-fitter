@@ -10,6 +10,7 @@
 # ===========================================================================
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 
 from ..core.base import PMTSpectrumFitter, ParamBlock
@@ -312,3 +313,91 @@ class GaussCompoundFitter(PMTSpectrumFitter):
             "ts_sigma": sigma * sigma_ts,
             "p0": (1.0 - frac) * np.exp(-lam_c),
         }
+
+
+# ==========================
+#     Bi-truncated Gauss
+# ==========================
+#
+#   f(Q>0) = w * TG(Q; Q1, s1) + (1-w) * TG(Q; a*Q1, b*s1),   f(Q<=0)=0
+#   TG(Q; q, s) = N(Q; q, s) / [ (1 + erf(q/(sqrt2 s))) / 2 ]   (kup EvalTruncatedGauss)
+#
+# spe = (Q1, s1, w, a, b) (a = charge ratio, b = sigma ratio of the
+# secondary).  The truncated-Gaussian characteristic function has no
+# elementary closed form (complex erf); it is a differentiable discrete
+# Fourier sum of the density on a charge grid, which also captures the x=0
+# truncation edge.  The grid resolution is set PER FITTER from its frequency
+# range (see _model_callables) so the quadrature Nyquist (pi/dx) always
+# covers the frequencies the fitter uses -- a fixed grid aliases once
+# `sample` pushes the frequency grid past its Nyquist.  kup-gain DYNODE
+# default; feed gain-normalised charge.
+
+_BTG_NX = 1024          # floor on the grid size (small-`sample` fitters)
+_BTG_XMAX = 6.0         # charge support cutoff (SER mass ~0 beyond, gain units)
+_BTG_OVERSAMPLE = 3.0   # grid Nyquist / max fitter frequency
+_SQRT2 = jnp.sqrt(2.0)
+_SQRT2PI = jnp.sqrt(2.0 * jnp.pi)
+
+
+def _trunc_gauss_pdf(x, q, s):
+    """Zero-truncated Gaussian density (kup EvalTruncatedGauss), x assumed > 0."""
+    gN = 0.5 * (1.0 + jax.scipy.special.erf(q / (_SQRT2 * s)))
+    return jnp.exp(-0.5 * ((x - q) / s) ** 2) / (s * _SQRT2PI * gN)
+
+
+def _trunc_gauss_mean(q, s):
+    from scipy.stats import norm
+    a = q / s
+    return q + s * norm.pdf(a) / max(norm.cdf(a), 1e-12)
+
+
+class BiTruncGaussFitter(PMTSpectrumFitter):
+    """kup-gain default DYNODE model: bi-truncated-Gaussian SER.
+
+    spe = (spe_mean, spe_sigma, w, f_Q, f_s); the secondary Gaussian has
+    mean = f_Q * spe_mean, sigma = f_s * spe_sigma, both truncated at 0.
+    Parametrised in gain units (kup laser.yaml kSPEMode) -- feed charge
+    normalised by the per-channel gain.
+    """
+
+    def _model_callables(self):
+        # Size the density-quadrature grid to THIS fitter's frequency range so
+        # its Nyquist (pi/dx) covers every frequency the likelihood evaluates.
+        # max|freq| grows with `sample`, so nx does too -- a fixed grid would
+        # alias above its Nyquist (~536 for the old 1024 pts).
+        wmax = float(np.max(np.abs(np.asarray(self.grid.freq))))
+        nx = max(int(np.ceil(_BTG_OVERSAMPLE * _BTG_XMAX * wmax / np.pi)), _BTG_NX)
+        xg = jnp.linspace(_BTG_XMAX / nx, _BTG_XMAX, nx)     # charge grid, >0
+        dx = _BTG_XMAX / nx
+
+        def ser_ft(freq, spe):
+            Q1, s1, w, a, b = spe
+            dens = (w * _trunc_gauss_pdf(xg, Q1, s1)
+                    + (1.0 - w) * _trunc_gauss_pdf(xg, a * Q1, b * s1))
+            dens = dens / (dens.sum() * dx)              # renormalise (grid clip)
+            # numpy.fft sign convention: f~(w) = int dens(x) exp(-i w x) dx
+            return (jnp.exp(-1j * jnp.outer(freq, xg)) * dens[None, :]).sum(1) * dx
+
+        return ser_ft, None, None
+
+    def _default_spe_block(self):
+        return ParamBlock(
+            name="spe",
+            names=["spe_mean", "spe_sigma", "w", "f_Q", "f_s"],
+            init=np.array([0.9, 0.3, 0.9, 0.3, 0.8]),
+            bounds=[(0.3, 1.8), (0.1, 0.8), (0.0, 1.0), (0.1, 0.6), (0.1, 1.5)],
+        )
+
+    def get_gain(self, spe, kind="gm"):
+        Q1, s1, w, a, b = (float(v) for v in spe)
+        if kind == "gp":
+            return Q1
+        if kind == "gm":
+            return w * _trunc_gauss_mean(Q1, s1) + (1.0 - w) * _trunc_gauss_mean(a * Q1, b * s1)
+        raise ValueError(f"Unknown gain kind: {kind!r}")
+
+    def spe_report(self, spe):
+        Q1, s1, w, a, b = (float(v) for v in spe)
+        return {"spe_mean": Q1, "spe_sigma": s1, "w": w, "f_Q": a, "f_s": b,
+                "sec_mean": a * Q1, "sec_sigma": b * s1,
+                "gain": self.get_gain(spe, "gm")}
